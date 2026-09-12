@@ -1,0 +1,40 @@
+name: Helm — lint e template
+
+on:
+  workflow_call:
+    inputs:
+      chart:
+        required: false
+        type: string
+        default: "oci://ghcr.io/slipalison/charts/app"
+      chart_version:
+        required: false
+        type: string
+        default: "0.1.0"
+      values:
+        description: "Caminho do values a validar"
+        required: true
+        type: string
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+
+      - name: Renderizar com os valores reais
+        # `helm lint` nao renderiza o template. Um erro que so aparece com os
+        # valores de verdade passa pelo lint sem uma palavra.
+        run: |
+          helm template validacao ${{ inputs.chart }} \
+            --version ${{ inputs.chart_version }} \
+            -f ${{ inputs.values }} > /tmp/render.yaml
+          wc -l /tmp/render.yaml
+
+      - name: Conferir que nada usa :latest
+        run: |
+          if grep -nE 'image: .*:latest' /tmp/render.yaml; then
+            echo "::error::Ha imagem com :latest no render. O Kyverno recusaria no cluster."
+            exit 1
+          fi

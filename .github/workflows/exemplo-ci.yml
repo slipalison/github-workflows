@@ -1,0 +1,28 @@
+name: Exemplo — CI completo de um app
+
+# Este arquivo nao roda aqui: e o que se copia para .github/workflows/ci.yml no
+# repositorio de uma aplicacao.
+on:
+  workflow_dispatch:
+
+jobs:
+  testes:
+    uses: slipalison/github-workflows/.github/workflows/dotnet.yml@main
+
+  imagem:
+    needs: testes
+    uses: slipalison/github-workflows/.github/workflows/build-push.yml@main
+    with:
+      image: ghcr.io/slipalison/meu-app
+
+  publicar:
+    needs: imagem
+    # So a branch principal chega ao cluster. Pull request faz imagem e testes
+    # e para por ai.
+    if: github.ref == 'refs/heads/main'
+    uses: slipalison/github-workflows/.github/workflows/deploy.yml@main
+    with:
+      app: meu-app
+      tag: ${{ needs.imagem.outputs.tag }}
+    secrets:
+      GITOPS_TOKEN: ${{ secrets.GITOPS_TOKEN }}
