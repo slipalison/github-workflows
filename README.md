@@ -99,6 +99,13 @@ resultado.
 **Mantenha `chart_version` igual à versão que o cluster usa.** Validar contra
 outra versão é pior do que não validar: passa no CI e renderiza diferente lá.
 
+São duas barreiras, e a primeira é a que mais pega: o chart `app` tem um
+`values.schema.json`, e `helm template` **falha antes de renderizar** se o
+values não atender — `tag: latest` é recusada por schema
+(`"not": {"const": "latest"}`), e faltar `name`, `image`, `port` ou `owner`
+também. A verificação de `:latest` no resultado é a segunda barreira, para uma
+imagem que venha de outro lugar do template.
+
 ---
 
 ## Ligar uma aplicação nova
