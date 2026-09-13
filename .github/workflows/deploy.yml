@@ -3,6 +3,17 @@ name: Deploy por commit no GitOps
 # Nao aplica nada no cluster. Escreve a tag nova no repositorio de GitOps e o
 # ArgoCD faz o resto — que e o ponto de usar GitOps: o estado do cluster e
 # sempre um commit que alguem pode ler, culpar e reverter.
+#
+# DUAS FORMAS DE AUTENTICAR, e a primeira e a preferida:
+#
+#   GITOPS_SSH_KEY   chave de deploy com escrita, criada NO repositorio de
+#                    GitOps. Alcanca aquele repositorio e mais nada, nao
+#                    depende de conta nenhuma e se revoga num clique.
+#
+#   GITOPS_TOKEN     token fine-grained com Contents: Read and write. Continua
+#                    funcionando, mas vive preso a uma conta de usuario: se ela
+#                    sair ou o token expirar, todo app que o usa para de
+#                    publicar ao mesmo tempo.
 on:
   workflow_call:
     inputs:
@@ -24,14 +35,40 @@ on:
         type: boolean
         default: false
     secrets:
+      GITOPS_SSH_KEY:
+        description: "Chave de deploy com escrita no repositorio de GitOps (preferida)"
+        required: false
       GITOPS_TOKEN:
-        required: true
+        description: "Token fine-grained com Contents: RW no repositorio de GitOps"
+        required: false
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout do GitOps
+      - name: Conferir que ha credencial
+        env:
+          TEM_CHAVE: ${{ secrets.GITOPS_SSH_KEY != '' }}
+          TEM_TOKEN: ${{ secrets.GITOPS_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          if [ "$TEM_CHAVE" != "true" ] && [ "$TEM_TOKEN" != "true" ]; then
+            echo "::error::Nem GITOPS_SSH_KEY nem GITOPS_TOKEN foram passados."
+            echo "::error::Sem credencial nao ha onde escrever a tag."
+            exit 1
+          fi
+          echo "credencial: $([ "$TEM_CHAVE" = "true" ] && echo "chave de deploy" || echo "token")"
+
+      - name: Checkout do GitOps (chave de deploy)
+        if: ${{ secrets.GITOPS_SSH_KEY != '' }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.gitops_repo }}
+          ssh-key: ${{ secrets.GITOPS_SSH_KEY }}
+          path: gitops
+
+      - name: Checkout do GitOps (token)
+        if: ${{ secrets.GITOPS_SSH_KEY == '' && secrets.GITOPS_TOKEN != '' }}
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.gitops_repo }}
@@ -39,6 +76,7 @@ jobs:
           path: gitops
 
       - name: Escrever a tag
+        id: escrita
         working-directory: gitops
         run: |
           set -euo pipefail
@@ -50,10 +88,15 @@ jobs:
           # yq em vez de sed: values.yaml e YAML, e sed em YAML funciona ate o
           # dia em que a indentacao muda.
           yq -i '.image.tag = "${{ inputs.tag }}"' "$arquivo"
-          git diff --quiet && { echo "Tag ja era ${{ inputs.tag }}; nada a fazer."; exit 0; }
+          if git diff --quiet; then
+            echo "Tag ja era ${{ inputs.tag }}; nada a fazer."
+            echo "mudou=nao" >> "$GITHUB_OUTPUT"
+          else
+            echo "mudou=sim" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Commitar
-        if: inputs.via_pr == false
+        if: steps.escrita.outputs.mudou == 'sim' && inputs.via_pr == false
         working-directory: gitops
         run: |
           set -euo pipefail
@@ -64,12 +107,16 @@ jobs:
           git push
 
       - name: Abrir pull request
-        if: inputs.via_pr == true
+        if: steps.escrita.outputs.mudou == 'sim' && inputs.via_pr == true
         working-directory: gitops
         env:
           GH_TOKEN: ${{ secrets.GITOPS_TOKEN }}
         run: |
           set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::via_pr exige GITOPS_TOKEN — a API de pull request nao aceita chave de deploy."
+            exit 1
+          fi
           ramo="deploy/${{ inputs.app }}-${{ inputs.tag }}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
