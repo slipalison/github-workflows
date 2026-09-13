@@ -1,265 +1,254 @@
 # github-workflows
 
-Workflows reutilizáveis de CI/CD. Cada repositório de aplicação chama estes em
-vez de copiar cem linhas de YAML que depois divergem.
-
-O desenho tem um princípio, e vale entendê-lo antes de ler o resto: **o CI não
-fala com o cluster.** Ele constrói a imagem e escreve um commit num repositório
-de GitOps. O cluster puxa. Não existe `kubeconfig` guardado no GitHub, e o que
-está rodando é sempre um arquivo que alguém pode ler, culpar e reverter.
-
----
-
-## O caminho completo, do push ao cluster
-
-```
-git push (main)
-   │
-   ▼
-ci.yml no repositório do app
-   ├─ testes ........................ dotnet.yml
-   ├─ imagem ........................ build-push.yml
-   │    ├─ tag = sha-<7 primeiros do commit>
-   │    ├─ build com cache, push no GHCR
-   │    └─ Trivy: CRITICAL derruba o build, HIGH fica no log
-   └─ publicar (só na main) ......... deploy.yml
-        ├─ clona o repositório de GitOps com o GITOPS_TOKEN
-        ├─ yq -i '.image.tag = "sha-…"' em apps/<app>/values.yaml
-        └─ commit + push        ← o CI acaba aqui
-   │
-   ▼
-ArgoCD vê o commit e sincroniza
-   │
-   ▼
-Argo Rollouts: canary → análise sobre as métricas → 100 %, ou aborta
-```
-
-Pull request roda testes e imagem e **para aí**. Só a branch principal chega ao
-cluster.
-
----
-
-## Os workflows
-
-| Workflow | O que faz |
-|---|---|
-| `build-push.yml` | Imagem com cache, tag `sha-<7>`, push no GHCR e varredura Trivy. Devolve a tag. |
-| `deploy.yml` | Escreve a tag em `apps/<app>/values.yaml` do repositório de GitOps e commita. Não toca no cluster. |
-| `dotnet.yml` | Restore, build e testes com cobertura. |
-| `python.yml` | Lint com ruff (`check` e `format`) e testes com pytest, com cobertura mínima opcional. |
-| `helm-lint.yml` | Renderiza o chart com os valores reais e recusa `:latest`. |
-| `exemplo-ci.yml` | Modelo para copiar no repositório de um app. |
-
-### `build-push.yml`
-
-| | |
-|---|---|
-| **Entradas** | `image` (obrigatória, ex.: `ghcr.io/usuario/meu-app`), `context` (`.`), `dockerfile` (`Dockerfile`), `platforms` (`linux/amd64`) |
-| **Saída** | `tag` — `sha-<7>`, o que o `deploy.yml` recebe |
-| **Permissões** | **quem chama precisa conceder** `packages: write` no job |
+Esteira de CI/CD reutilizável. Um repositório de aplicação chama **um** workflow
+e recebe lint, testes, cobertura com piso, imagem com portão de vulnerabilidade,
+seis varreduras de segurança, Sonar com Quality Gate e o commit no GitOps — com
+tudo o que pode ser paralelo rodando em paralelo.
 
 ```yaml
-  imagem:
-    permissions:        # sem isto o run morre em startup_failure
-      contents: read
-      packages: write
-    uses: slipalison/github-workflows/.github/workflows/build-push.yml@main
-```
-
-Se o padrão do `GITHUB_TOKEN` na conta for somente leitura — e deveria ser —,
-um workflow reutilizável **não pode pedir mais permissão do que quem o chama
-concede**. O erro é `The workflow is requesting 'packages: write', but is only
-allowed 'packages: read'`, e ele não aparece em log de passo nenhum: o run
-inteiro morre antes de começar.
-
-A tag é o commit, não `latest`. É reproduzível, diz de onde veio, e políticas de
-admissão em cluster costumam recusar `latest` — com razão: `latest` é um nome
-que muda de significado sozinho.
-
-O Trivy derruba o build só em **CRITICAL**. `HIGH` aparece no log e vira
-trabalho planejado. Derrubar tudo ensina o time a ignorar o relatório.
-Exceções em `.trivyignore`, no repositório do app.
-
-### `deploy.yml`
-
-| | |
-|---|---|
-| **Entradas** | `app` (= diretório em `apps/` do GitOps), `tag`, `gitops_repo` (padrão `slipalison/homelab-gitops`), `via_pr` (padrão `false`) |
-| **Segredo** | `GITOPS_TOKEN` — **obrigatório** |
-
-Usa `yq`, não `sed`: `values.yaml` é YAML, e `sed` em YAML funciona até o dia em
-que a indentação muda.
-
-Se `apps/<app>/values.yaml` não existir, ele **falha com mensagem clara** em vez
-de criar o arquivo. É de propósito: quem define o que uma aplicação é — porta,
-réplicas, limites, hostname — não é o pipeline.
-
-`via_pr: true` abre um pull request em vez de commitar direto. É o caminho para
-ambiente que exige aprovação humana antes do deploy.
-
-### `helm-lint.yml`
-
-| | |
-|---|---|
-| **Entradas** | `values` (obrigatória), `chart` (padrão `oci://ghcr.io/slipalison/charts/app`), `chart_version` |
-
-**Roda no repositório que guarda o `values.yaml`** — normalmente o de GitOps, não
-o do app.
-
-`helm lint` sozinho não executa o template; um erro que só aparece com os
-valores de verdade passa por ele sem uma palavra. Por isso aqui é `helm
-template` com o values real, e uma verificação explícita de `:latest` no
-resultado.
-
-**Mantenha `chart_version` igual à versão que o cluster usa.** Validar contra
-outra versão é pior do que não validar: passa no CI e renderiza diferente lá.
-
-São duas barreiras, e a primeira é a que mais pega: o chart `app` tem um
-`values.schema.json`, e `helm template` **falha antes de renderizar** se o
-values não atender — `tag: latest` é recusada por schema
-(`"not": {"const": "latest"}`), e faltar `name`, `image`, `port` ou `owner`
-também. A verificação de `:latest` no resultado é a segunda barreira, para uma
-imagem que venha de outro lugar do template.
-
----
-
-## Ligar uma aplicação nova
-
-### 1. No repositório de GitOps: criar o diretório do app
-
-```yaml
-# apps/meu-app/values.yaml
-name: meu-app
-owner: fulano
-
-image:
-  repository: ghcr.io/usuario/meu-app
-  tag: sha-0000000      # o CI reescreve esta linha a cada deploy
-
-port: 8080
-replicas: 2
-
-resources:
-  requests: { cpu: 10m, memory: 64Mi }
-  limits:   { memory: 256Mi }
-```
-
-Este é o contrato do chart [`app`](https://github.com/slipalison/helm-charts),
-que monta Rollout com canary, Service, VirtualService, NetworkPolicy e o resto.
-Com um `ApplicationSet` varrendo `apps/*`, o diretório basta — não se escreve
-`Application` à mão.
-
-### 2. No repositório do app: o `ci.yml`
-
-```yaml
-# .github/workflows/ci.yml
-on:
-  push:
-    branches: [main]
-  pull_request:
-
 jobs:
-  testes:
-    uses: slipalison/github-workflows/.github/workflows/dotnet.yml@main
-
-  imagem:
-    needs: testes
-    uses: slipalison/github-workflows/.github/workflows/build-push.yml@main
+  esteira:
+    permissions: { contents: read, packages: write, security-events: write, actions: read }
+    uses: slipalison/github-workflows/.github/workflows/pipeline.yml@main
     with:
-      image: ghcr.io/usuario/meu-app
-
-  publicar:
-    needs: imagem
-    if: github.ref == 'refs/heads/main'
-    uses: slipalison/github-workflows/.github/workflows/deploy.yml@main
-    with:
+      componentes: '[{"nome":"app","linguagem":"python","cobertura":80}]'
+      imagem: ghcr.io/slipalison/meu-app
       app: meu-app
-      tag: ${{ needs.imagem.outputs.tag }}
+      sonar_projeto: slipalison_meu-app
     secrets:
-      GITOPS_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      GITOPS_SSH_KEY: ${{ secrets.GITOPS_SSH_KEY }}
 ```
 
-### 3. O segredo `GITOPS_TOKEN`
-
-```bash
-gh secret set GITOPS_TOKEN -R usuario/meu-app
-```
-
-Token **fine-grained**, com `Contents: Read and write` **apenas** no repositório
-de GitOps. Não é o `GITHUB_TOKEN` automático — aquele não alcança outro
-repositório. O que não se faz é dar escopo de conta inteira a um workflow.
-
-### 4. Deixar a imagem acessível ao cluster
-
-O cluster puxa a imagem. Se o pacote no GHCR estiver **privado** e não houver
-`imagePullSecret` configurado, o pod fica em `ImagePullBackOff` — e a mensagem
-não diz "falta credencial", diz que não encontrou.
-
-Ou o pacote é público (*Package settings → Change visibility*), ou o chart
-precisa de `imagePullSecrets` e um `dockerconfigjson` no namespace do app.
+Exemplos completos e comentados em [`exemplos/`](exemplos/): Python simples,
+repositório poliglota .NET + dois frontends, e repositório privado.
 
 ---
 
-## O que só se descobre fazendo
+## O desenho
 
-Quatro coisas que não estão em nenhum tutorial e custam uma noite cada.
-
-**1. Canary sem tráfego não conclui.** Se a análise do Rollouts consulta a taxa
-de sucesso num Prometheus, sem requisição não há série — e sem série a análise
-**erra**, não passa. Numa aplicação de pouco acesso, um deploy legítimo pode
-abortar sem nada estar errado. Ou se garante tráfego durante a janela, ou se
-afrouxam `count` e `interval` naquele app.
-
-**2. Um rollout abortado não volta com um commit novo.** Se a imagem for a
-mesma, não há revisão nova a criar e o GitOps não tem o que fazer:
-
-```bash
-kubectl argo rollouts retry rollout meu-app -n meu-app
+```
+        ┌─ qualidade  (N componentes, N jobs paralelos)
+        ├─ imagem     (build → varre → publica)
+push ───┼─ sonar      (análise + Quality Gate)          ─── portão ─── publicar
+        └─ seguranca  (7 jobs paralelos)                               (só na main)
 ```
 
-**3. O primeiro deploy nunca é canary.** Sem versão anterior não há para onde
-dividir tráfego: o Rollout sobe direto. O canary vale do segundo deploy em
-diante.
+O relógio é o do job mais lento, não a soma.
 
-**4. Se o hostname vem de um CNAME curinga, a aplicação nasce pública** no
-instante em que o `VirtualService` sincroniza. Publicar primeiro e proteger
-depois é uma janela aberta, por menor que pareça.
+### A mudança que mais importa
+
+A esteira anterior daqui era `testes → imagem → publicar`. Três etapas em fila,
+e a do meio esperava por um motivo que não se sustenta: `docker build` não
+depende de `pytest`. O que não pode acontecer é imagem de código reprovado
+**chegar ao cluster** — e quem impede isso é o `publicar`, não o `imagem`. Uma
+tag `sha-<commit>` no registro de um commit que falhou não machuca ninguém:
+ninguém a referencia, e o GitOps nunca a aponta.
+
+No `demo-python`, medido: `testes` + `imagem` em fila davam ~2min40. Em
+paralelo, ~1min30.
 
 ---
 
-## Quando o deploy não chega ao cluster
+## O que veio da análise dos dois repositórios
 
-Na ordem, do mais comum ao mais raro:
+O pedido foi olhar
+[`simulator-ccb/.github/workflows/ci.yml`](https://github.com/slipalison/simulator-ccb/blob/master/.github/workflows/ci.yml)
+e [`TranslateReader/.github/workflows`](https://github.com/slipalison/TranslateReader/tree/main/.github/workflows).
+São dois extremos úteis: um monólito de 1296 linhas e um conjunto de doze
+arquivos pequenos.
 
-```bash
-# 1. o CI escreveu a tag?
-git -C gitops log --oneline -3 -- apps/meu-app/values.yaml
+### `simulator-ccb` — o que estava certo, e o que custava caro
 
-# 2. o ArgoCD viu o commit?
-kubectl -n argocd get app meu-app \
-  -o custom-columns=SYNC:.status.sync.status,SAUDE:.status.health.status,REV:.status.sync.revision
+Certo: as varreduras de segurança já rodavam em paralelo, `permissions:
+read-all` no topo, e um resumo por job no painel do run — que é uma prática boa
+e rara.
 
-# 3. o rollout está andando, parado ou abortado?
-kubectl argo rollouts get rollout meu-app -n meu-app
+O que foi corrigido aqui:
 
-# 4. a análise reprovou?
-kubectl -n meu-app get analysisrun
+**`needs` que não economiza nada.** `backend-tests` declara `needs:
+backend-build`, mas `backend-build` não sobe artefato nenhum. O job de teste
+refaz `restore` e `build` do zero. O `needs` ali não reaproveita trabalho: ele
+apenas **serializa dois builds idênticos**. São três pares (backend, dois
+frontends), seis builds, três esperas — para nada. Aqui build e teste vivem no
+mesmo job, e o que corre em paralelo são os componentes, que de fato não
+dependem uns dos outros.
 
-# 5. o pod subiu?
-kubectl -n meu-app get pods
-```
+**~600 linhas de `echo`.** Cada job de segurança termina montando a mesma tabela
+à mão no `$GITHUB_STEP_SUMMARY`, e antes disso chama quatro `python3 -c` de uma
+linha para contar achados no mesmo JSON. Dez jobs, dez cópias. Só que todas
+aquelas ferramentas falam **SARIF** — então ler, contar e desenhar a tabela é
+*um* problema. Virou [`bin/resumo_sarif.py`](bin/resumo_sarif.py), chamado por
+uma composite action.
 
-`ImagePullBackOff` no passo 5 quase sempre é o pacote privado no registro.
+**O portão de cobertura dentro do YAML.** Sessenta linhas de bash chamando um
+Python embutido que devolve seis números por posição de linha (`sed -n '1p'`,
+`sed -n '2p'`…), depois `bc -l` para comparar. Não roda fora do CI, não se
+testa, e a única forma de saber se funciona é quebrar um pull request. Virou
+[`bin/cobertura.py`](bin/cobertura.py), que roda no terminal e é exercitado nas
+duas cores pelo CI deste repositório.
+
+**Actions por tag móvel** (`@v6`, `@v5`, `@v3`) — ver a seção de segurança
+abaixo.
+
+**Sem `concurrency`.** Três pushes seguidos rodavam três esteiras completas em
+paralelo.
+
+### `TranslateReader` — o que foi copiado
+
+Este é o repositório maduro dos dois, e três coisas vieram dele quase inteiras:
+
+**O guard contra o pulo silencioso**, e é a melhor peça do conjunto.
+`${{ secrets.SONAR_TOKEN }}` vazio **não dá erro**: os passos são pulados, o job
+fica verde, e o Quality Gate — que é check obrigatório — passa sem ter analisado
+uma linha. O controle desaparece sem deixar rastro. O guard falha alto onde o
+token deveria existir e avisa onde a ausência é legítima (fork, Dependabot).
+Está generalizado em [`sonar.yml`](.github/workflows/sonar.yml).
+
+É a mesma família de falha que este projeto já pagou duas vezes no cluster: o
+webhook do OpenTelemetry com `failurePolicy: Ignore`, e a NetworkPolicy que
+cortou o Alloy. Nos três casos o painel ficava verde.
+
+**`sonar.qualitygate.wait=true` na fase `begin`**, e não na `end`: o
+SonarScanner for .NET recusa a chave no `end` com *"This setting is not valid in
+the end phase in this version of the C# plugin"* e sai 1 sem sequer consultar o
+portão — o que parece reprovação e não é.
+
+**`harden-runner`, SHA em todo `uses:`, `persist-credentials: false`.**
+
+O que **não** veio: a duplicação. O mesmo preâmbulo de quatro passos aparece nos
+doze arquivos, e a mesma versão do `harden-runner` está fixada em doze lugares —
+atualizar é editar doze arquivos e torcer para não esquecer nenhum, e um
+esquecido não dá erro, só deixa de ter a proteção. Aqui isso é
+[uma composite action](.github/actions/preparar/action.yml) e
+[um arquivo de versões](actions.lock.json).
 
 ---
 
-## O que estes workflows deliberadamente não fazem
+## Segurança
 
-- **Não aplicam no cluster.** Sem `kubeconfig` no GitHub, sem `kubectl apply`
-  em workflow. O preço é que o CI não sabe se o deploy deu certo; quem sabe é o
-  ArgoCD, e é lá que se olha.
-- **Não promovem entre ambientes.** Com mais de um cluster, o caminho é
-  `via_pr: true` — a mesma esteira abrindo um pull request em vez de commitar.
-- **Não fazem rollback por pipeline.** Reverter é `git revert` no GitOps. O
-  rollback automático do canary é outra coisa: acontece em segundos, sem commit
-  nenhum, e é o que segura um deploy ruim antes de virar problema.
+| Controle | Onde | Por quê |
+|---|---|---|
+| Todo `uses:` fixado por **SHA** | [`actions.lock.json`](actions.lock.json) + [`bin/pinar_actions.py`](bin/pinar_actions.py) | Uma tag é ponteiro móvel. `@v4` não diz qual código roda — diz o que o dono daquele repositório está chamando de v4 hoje, e esse código roda com o `GITHUB_TOKEN` do run e vê os secrets do job. Foi assim que o `tj-actions/changed-files` alcançou milhares de pipelines em 2025. |
+| `harden-runner` em todo job | [`preparar`](.github/actions/preparar/action.yml) | Registra (ou bloqueia) a saída de rede do runner. No `deploy.yml` é `block` com lista fechada — é o único job que segura credencial de escrita em outro repositório. |
+| `persist-credentials: false` | idem | Por padrão o checkout deixa o token do run gravado em `.git/config`, legível por qualquer passo seguinte, inclusive por script de dependência de terceiro. |
+| Valores dinâmicos por `env`, nunca por interpolação dentro de `run:` | [`sonar.yml`](.github/workflows/sonar.yml) | `${{ }}` é substituído no **texto** do script antes de o bash ver a primeira linha. `pull_request.head.ref` é um nome de branch — escolhido por quem abre o PR, inclusive de um fork. Por `env`, o valor é dado; por interpolação, pode virar comando. |
+| `permissions` mínimo, por job | todos | Um workflow reutilizável nunca recebe mais permissão do que o chamador concede. |
+| Imagem varrida **antes** de publicar | [`build-push.yml`](.github/workflows/build-push.yml) | A versão anterior publicava e só depois varria: uma imagem com CRITICAL ficava no GHCR mesmo com o job vermelho. |
+| Segredo varrido no **histórico inteiro** | [`seguranca.yml`](.github/workflows/seguranca.yml) | Um segredo removido do HEAD continua em qualquer clone. Achado ali significa **rotacionar**, não apagar a linha. |
+| `concurrency` com `cancel-in-progress` | exemplos | Impede que um run obsoleto ainda escreva no GitOps. |
+
+O CI deste repositório roda `pinar_actions.py --verificar`, que **falha** se
+algum `uses:` escapar por tag ou divergir do lock.
+
+Atualizar as actions:
+
+```bash
+python bin/pinar_actions.py --atualizar   # resolve as versões novas e reescreve
+git diff                                  # ler ANTES de commitar
+```
+
+A leitura do diff não é formalidade: atualizar action é trocar código de
+terceiro que roda com os seus secrets.
+
+---
+
+## Sonar para todo mundo, público e privado
+
+O portão é o mesmo nos dois casos; o que muda é onde a análise roda, e a razão é
+licença.
+
+| | Público | Privado |
+|---|---|---|
+| **Sonar** | SonarQube Cloud, gratuito | Cloud é pago → `sonar_host` aponta para instância própria |
+| **SARIF na aba Security** | gratuito | exige GitHub Advanced Security (pago) |
+| **CodeQL** | gratuito | idem |
+
+Com `publicar_sarif: auto` (o padrão), o envio do SARIF é detectado e pulado em
+repositório privado — o que evita o 403 — **sem desligar controle nenhum**: o
+resultado continua no painel de cada job, escrito por `resumo_sarif.py`, e os
+portões continuam derrubando o run. Perde-se a aba, não a verificação.
+
+O que **não** se faz é deixar um repositório privado sem análise e fingir que o
+portão existe. Para isso há `sonar_exigir_token: false`, que é explícito, aparece
+no diff, e emite `::warning::` em todo run.
+
+---
+
+## O que tem aqui
+
+| Arquivo | O que faz |
+|---|---|
+| [`pipeline.yml`](.github/workflows/pipeline.yml) | Orquestrador. É o único que a aplicação precisa chamar. |
+| [`qualidade.yml`](.github/workflows/qualidade.yml) | Lint, testes e cobertura — um job paralelo por componente. dotnet, python, node, go. |
+| [`seguranca.yml`](.github/workflows/seguranca.yml) | Gitleaks, TruffleHog, Semgrep, CodeQL, SCA (Trivy fs), IaC e SBOM, em paralelo. |
+| [`sonar.yml`](.github/workflows/sonar.yml) | SonarQube/Cloud com Quality Gate e o guard anti-pulo. |
+| [`build-push.yml`](.github/workflows/build-push.yml) | Imagem: constrói, varre, publica. Devolve `tag` e `digest`. |
+| [`deploy.yml`](.github/workflows/deploy.yml) | Escreve a tag no GitOps. Não toca no cluster — quem aplica é o ArgoCD. |
+| [`helm-lint.yml`](.github/workflows/helm-lint.yml) | Renderiza o chart com os valores reais e recusa `:latest`. |
+| [`ci.yml`](.github/workflows/ci.yml) | O CI **deste** repositório. |
+
+Composite actions: [`preparar`](.github/actions/preparar/action.yml),
+[`relatar-sarif`](.github/actions/relatar-sarif/action.yml),
+[`relatar-cobertura`](.github/actions/relatar-cobertura/action.yml).
+
+Scripts: [`resumo_sarif.py`](bin/resumo_sarif.py),
+[`cobertura.py`](bin/cobertura.py), [`pinar_actions.py`](bin/pinar_actions.py).
+
+### Por que Python, e não Node ou Go
+
+Já está no runner, roda sem passo de instalação, e o Actions aceita
+`shell: python` nativamente. Node também está, mas Go exigiria um passo de build
+antes do primeiro uso — custo fixo em todo job, para resolver o mesmo problema.
+
+Os três scripts rodam **fora do CI**, no terminal, com os arquivos na mão. Isso
+não é conveniência: é o que permite provar que um portão reprova quando deve,
+sem abrir um pull request só para ver a cor.
+
+---
+
+## Os componentes
+
+Um componente é uma unidade que compila e testa sozinha. Cada um vira um job
+paralelo.
+
+```yaml
+componentes: |
+  [
+    {"nome":"backend","linguagem":"dotnet","versao":"10.0.x",
+     "projeto":"Onboarding.slnx","cobertura":80},
+    {"nome":"frontend-client","linguagem":"node","versao":"24",
+     "projeto":"frontend-client"}
+  ]
+```
+
+| Campo | |
+|---|---|
+| `nome` | rótulo do job e do artefato. Sem ele a tela mostra `qualidade (Object)` em todos. |
+| `linguagem` | `dotnet` \| `python` \| `node` \| `go` |
+| `versao` | opcional |
+| `caminho` | diretório de trabalho, padrão `.` |
+| `projeto` | dotnet: `.sln`/`.csproj` · node: workspace · go: `./...` |
+| `cobertura` | piso em %; `0` (padrão) desliga |
+
+`fail-fast: false` de propósito: o padrão mata os outros componentes quando um
+falha e mostra só o primeiro erro — com três componentes, isso vira três rodadas
+de CI para descobrir três problemas que dava para ver de uma vez.
+
+---
+
+## Pré-requisitos fora daqui
+
+1. **`apps/<nome>/values.yaml` no repositório de GitOps.** O deploy falha de
+   propósito se não existir: quem define o que um app é não é o pipeline.
+2. **Credencial de escrita no GitOps** — `GITOPS_SSH_KEY` (chave de deploy
+   criada *no* repositório de GitOps, preferida: alcança aquele repositório e
+   mais nada) ou `GITOPS_TOKEN` (fine-grained, `Contents: RW`).
+3. **`permissions` declarado no job que chama** — `packages: write` para a
+   imagem, `security-events: write` para o SARIF. Sem isso o run morre em
+   `startup_failure` com *"requesting 'packages: write', but is only allowed
+   'packages: read'"*, que **não aparece no log de passo nenhum**.
+4. **`SONAR_TOKEN`** no repositório, para a análise.
+5. **Imagem acessível ao cluster.** Pacote privado no GHCR sem `imagePullSecret`
+   deixa o pod em `ImagePullBackOff` dizendo que não encontrou a imagem — o que
+   não parece um problema de credencial.

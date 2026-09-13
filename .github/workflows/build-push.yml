@@ -1,7 +1,20 @@
-name: Build, varredura e push
+name: Imagem
 
-# Chamado pelo CI de cada aplicacao. Faz a imagem, varre por vulnerabilidade e
-# devolve a tag que o deploy vai escrever no GitOps.
+# Constroi, varre e publica. Devolve a tag que o deploy escreve no GitOps.
+#
+# A ORDEM IMPORTA
+# ---------------
+# A versao anterior publicava e so depois varria. Uma imagem com CRITICAL
+# chegava ao GHCR — publica, no caso deste dono — e ficava la mesmo com o job
+# vermelho. Nao chegava ao cluster (quem impede isso e o `publicar`), mas estava
+# no registro, acessivel.
+#
+# Agora, quando ha uma plataforma so — o caso normal aqui —, a imagem e
+# carregada no daemon local, varrida, e SO ENTAO publicada. O segundo `build`
+# nao reconstroi nada: o layer ja esta no cache do buildx, entao custa segundos.
+# Em multi-plataforma isso nao existe (`load` nao aceita mais de uma), e ai o
+# caminho antigo volta, com o portao valendo igual.
+
 on:
   workflow_call:
     inputs:
@@ -10,12 +23,10 @@ on:
         required: true
         type: string
       context:
-        description: "Diretorio de build"
         required: false
         type: string
         default: "."
       dockerfile:
-        description: "Caminho do Dockerfile"
         required: false
         type: string
         default: "Dockerfile"
@@ -33,39 +44,83 @@ on:
         required: false
         type: string
         default: "CRITICAL"
+      publicar_sarif:
+        description: "auto (publico sim, privado nao) | sempre | nunca"
+        required: false
+        type: string
+        default: "auto"
     outputs:
       tag:
         description: "Tag publicada (sha-<7>)"
         value: ${{ jobs.build.outputs.tag }}
+      digest:
+        description: "Digest da imagem publicada, para referencia imutavel"
+        value: ${{ jobs.build.outputs.digest }}
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   build:
+    name: Imagem
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
+      digest: ${{ steps.publicar.outputs.digest }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Preparar
+        uses: slipalison/github-workflows/.github/actions/preparar@main
 
       - name: Tag a partir do commit
         id: meta
-        # sha-<7> e reproduzivel e diz de onde veio. 'latest' nao diz nada e o
-        # Kyverno recusa no cluster.
-        run: echo "tag=sha-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+        env:
+          PLATAFORMAS: ${{ inputs.platforms }}
+        run: |
+          set -euo pipefail
+          # sha-<7> e reproduzivel e diz de onde veio. `latest` nao diz nada, nao
+          # permite rollback, e o Kyverno recusa no cluster.
+          echo "tag=sha-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+          # Virgula em `platforms` significa multi-plataforma, e `load: true` nao
+          # aceita mais de uma — e o que decide entre varrer antes ou depois de
+          # publicar.
+          case "$PLATAFORMAS" in
+            *,*) echo "uma_plataforma=false" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "uma_plataforma=true"  >> "$GITHUB_OUTPUT" ;;
+          esac
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build e push
-        uses: docker/build-push-action@v6
+      # ----------------------------- caminho A: uma plataforma (o normal) -----
+      - name: Construir para o daemon local
+        if: steps.meta.outputs.uma_plataforma == 'true'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          platforms: ${{ inputs.platforms }}
+          load: true
+          push: false
+          tags: ${{ inputs.image }}:${{ steps.meta.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      # ------------------- caminho B: multi-plataforma, publica antes de varrer
+      - name: Construir e publicar (multi-plataforma)
+        if: steps.meta.outputs.uma_plataforma == 'false'
+        id: publicar_multi
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: ${{ inputs.context }}
           file: ${{ inputs.dockerfile }}
@@ -76,28 +131,102 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: false
 
-      # DOIS passos, e nao um com severidade dupla. O trivy-action da
-      # precedencia a `severity` (entrada) sobre TRIVY_SEVERITY (ambiente),
-      # entao a versao anterior dizia no comentario que so CRITICAL derrubava e
-      # derrubava HIGH tambem. Separado, cada passo tem um proposito so.
-      - name: Relatorio de vulnerabilidades (nao derruba)
-        uses: aquasecurity/trivy-action@v0.36.0
+      # ------------------------------------------------------------ varredura -
+      - name: Varrer a imagem (relatorio, nao derruba)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ inputs.image }}:${{ steps.meta.outputs.tag }}
-          format: table
+          format: sarif
+          output: trivy-imagem.sarif
           severity: CRITICAL,HIGH,MEDIUM
-          exit-code: '0'
           ignore-unfixed: true
           vuln-type: os,library
           trivyignores: ${{ inputs.trivyignores }}
+          exit-code: "0"
 
-      - name: Portao de seguranca (CRITICAL derruba)
-        uses: aquasecurity/trivy-action@v0.36.0
+      - name: Contexto da publicacao de SARIF
+        id: sarif
+        env:
+          MODO: ${{ inputs.publicar_sarif }}
+          PRIVADO: ${{ github.event.repository.private }}
+        run: |
+          set -euo pipefail
+          privado="${PRIVADO:-true}"
+          case "$MODO" in
+            sempre) publica=true ;;
+            nunca)  publica=false ;;
+            *)      if [ "$privado" = "false" ]; then publica=true; else publica=false; fi ;;
+          esac
+          echo "publica=$publica" >> "$GITHUB_OUTPUT"
+
+      - name: Enviar para a aba Security
+        if: always() && steps.sarif.outputs.publica == 'true' && hashFiles('trivy-imagem.sarif') != ''
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          sarif_file: trivy-imagem.sarif
+          category: trivy-imagem
+
+      - name: Relatorio no painel
+        if: always()
+        uses: slipalison/github-workflows/.github/actions/relatar-sarif@main
+        with:
+          sarif: trivy-imagem.sarif
+          titulo: "Imagem - vulnerabilidades"
+          bloquear: ""
+          explicacao: >-
+            Relatorio completo (CRITICAL, HIGH e MEDIUM), sem portao. O portao e
+            o passo seguinte, e roda separado por um motivo medido: o
+            `trivy-action` da precedencia a entrada `severity` sobre a variavel
+            `TRIVY_SEVERITY`, entao a versao que tentava fazer as duas coisas num
+            passo so dizia no comentario que bloqueava CRITICAL e bloqueava HIGH
+            junto.
+
+      - name: Portao de seguranca
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ inputs.image }}:${{ steps.meta.outputs.tag }}
           format: table
           severity: ${{ inputs.severidade_bloqueante }}
-          exit-code: '1'
+          # ignore-unfixed: CVE sem correcao disponivel nao e acionavel. Bloquear
+          # por ele so ensina a lista de excecao a crescer — e uma lista de
+          # excecao grande e um portao desligado com passos extras.
           ignore-unfixed: true
           vuln-type: os,library
           trivyignores: ${{ inputs.trivyignores }}
+          exit-code: "1"
+
+      # ---------------------------------------------------- publicar (A) ------
+      # So chega aqui se o portao acima passou: a imagem com CRITICAL nunca sai
+      # da maquina.
+      - name: Publicar
+        id: publicar
+        if: steps.meta.outputs.uma_plataforma == 'true'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          platforms: ${{ inputs.platforms }}
+          push: true
+          tags: ${{ inputs.image }}:${{ steps.meta.outputs.tag }}
+          # Mesmo cache do passo de construcao: nao ha recompilacao, so o envio
+          # dos layers.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Resumo
+        if: always()
+        env:
+          IMAGEM: ${{ inputs.image }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          DIGEST: ${{ steps.publicar.outputs.digest || steps.publicar_multi.outputs.digest }}
+        run: |
+          {
+            echo "## Imagem"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Referencia | \`${IMAGEM}:${TAG}\` |"
+            echo "| Digest | \`${DIGEST:-nao publicada}\` |"
+            echo "| Portao | ${{ inputs.severidade_bloqueante }} derruba |"
+          } >> "$GITHUB_STEP_SUMMARY"

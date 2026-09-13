@@ -1,0 +1,266 @@
+name: Pipeline
+
+# A esteira inteira num `uses:` so. O repositorio da aplicacao passa a ter um
+# ci.yml de vinte linhas em vez de copiar a orquestracao.
+#
+# O DESENHO, E A MUDANCA QUE MAIS IMPORTA
+# ---------------------------------------
+# Antes, aqui e no `demo-python`:
+#
+#     testes  ->  imagem  ->  publicar
+#
+# Tres etapas em fila. A imagem esperava os testes por um motivo que nao se
+# sustenta: `docker build` nao depende de `pytest`. O que NAO pode acontecer e
+# uma imagem de codigo reprovado chegar ao cluster — e quem impede isso e o
+# `publicar`, nao o `imagem`. Uma tag `sha-<commit>` no registro de um commit que
+# falhou nao machuca ninguem: ninguem a referencia.
+#
+# Agora:
+#
+#     qualidade  ─┐
+#     imagem     ─┤
+#     sonar      ─┼──>  publicar   (so na main, e so se TUDO passou)
+#     seguranca  ─┘
+#
+# O relogio passa a ser o do job mais lento, e nao a soma. Com o `demo-python`
+# medido, `testes` + `imagem` em fila davam ~2min40; em paralelo, ~1min30.
+#
+# `publicar` usa `needs` com TODOS eles justamente porque ali o `needs` significa
+# alguma coisa — diferente do `needs: backend-build` do `simulator-ccb`, que so
+# serializa dois builds identicos porque o primeiro nao deixa artefato.
+
+on:
+  workflow_call:
+    inputs:
+      # ----------------------------------------------------------- qualidade --
+      componentes:
+        description: >-
+          JSON array, um objeto por componente que compila/testa sozinho. Um job
+          paralelo para cada. Ver o cabecalho de qualidade.yml.
+        required: false
+        type: string
+        default: '[{"nome":"app","linguagem":"python"}]'
+
+      # -------------------------------------------------------------- imagem --
+      imagem:
+        description: "Nome da imagem sem tag. Vazio pula o build de imagem."
+        required: false
+        type: string
+        default: ""
+      contexto_build:
+        required: false
+        type: string
+        default: "."
+      dockerfile:
+        required: false
+        type: string
+        default: "Dockerfile"
+      trivyignores:
+        required: false
+        type: string
+        default: ""
+      severidade_bloqueante:
+        required: false
+        type: string
+        default: "CRITICAL"
+
+      # --------------------------------------------------------------- sonar --
+      sonar_projeto:
+        description: "sonar.projectKey. Vazio pula o Sonar."
+        required: false
+        type: string
+        default: ""
+      sonar_organizacao:
+        required: false
+        type: string
+        default: "slipalison"
+      sonar_host:
+        required: false
+        type: string
+        default: "https://sonarcloud.io"
+      sonar_modo:
+        required: false
+        type: string
+        default: "generico"
+      sonar_linguagem:
+        required: false
+        type: string
+        default: "nenhuma"
+      sonar_projeto_dotnet:
+        required: false
+        type: string
+        default: ""
+      sonar_comando_testes:
+        required: false
+        type: string
+        default: ""
+      sonar_parametros:
+        required: false
+        type: string
+        default: ""
+      sonar_exigir_token:
+        required: false
+        type: boolean
+        default: true
+
+      # ----------------------------------------------------------- seguranca --
+      linguagens_codeql:
+        required: false
+        type: string
+        default: '[]'
+      caminho_iac:
+        required: false
+        type: string
+        default: ""
+      publicar_sarif:
+        required: false
+        type: string
+        default: "auto"
+
+      # ------------------------------------------------------------ publicar --
+      app:
+        description: "Nome do app no GitOps. Vazio desliga o deploy."
+        required: false
+        type: string
+        default: ""
+      gitops_repo:
+        required: false
+        type: string
+        default: "slipalison/homelab-gitops"
+      branch_de_producao:
+        required: false
+        type: string
+        default: "main"
+    secrets:
+      SONAR_TOKEN:
+        required: false
+      GITOPS_SSH_KEY:
+        required: false
+      GITOPS_TOKEN:
+        required: false
+
+# O minimo para todo mundo. Cada job pede o que precisa a mais — e um job que
+# pede a mais so consegue se QUEM CHAMOU tiver concedido: um workflow
+# reutilizavel nunca recebe mais permissao que o chamador.
+permissions:
+  contents: read
+
+jobs:
+  qualidade:
+    uses: slipalison/github-workflows/.github/workflows/qualidade.yml@main
+    with:
+      componentes: ${{ inputs.componentes }}
+
+  imagem:
+    if: inputs.imagem != ''
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+    uses: slipalison/github-workflows/.github/workflows/build-push.yml@main
+    with:
+      image: ${{ inputs.imagem }}
+      context: ${{ inputs.contexto_build }}
+      dockerfile: ${{ inputs.dockerfile }}
+      trivyignores: ${{ inputs.trivyignores }}
+      severidade_bloqueante: ${{ inputs.severidade_bloqueante }}
+      publicar_sarif: ${{ inputs.publicar_sarif }}
+
+  sonar:
+    if: inputs.sonar_projeto != ''
+    permissions:
+      contents: read
+    uses: slipalison/github-workflows/.github/workflows/sonar.yml@main
+    with:
+      projeto: ${{ inputs.sonar_projeto }}
+      organizacao: ${{ inputs.sonar_organizacao }}
+      host: ${{ inputs.sonar_host }}
+      modo: ${{ inputs.sonar_modo }}
+      linguagem: ${{ inputs.sonar_linguagem }}
+      projeto_dotnet: ${{ inputs.sonar_projeto_dotnet }}
+      comando_testes: ${{ inputs.sonar_comando_testes }}
+      parametros: ${{ inputs.sonar_parametros }}
+      exigir_token: ${{ inputs.sonar_exigir_token }}
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  seguranca:
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    uses: slipalison/github-workflows/.github/workflows/seguranca.yml@main
+    with:
+      linguagens_codeql: ${{ inputs.linguagens_codeql }}
+      caminho_iac: ${{ inputs.caminho_iac }}
+      publicar_sarif: ${{ inputs.publicar_sarif }}
+
+  publicar:
+    # Aqui o `needs` vale: e o unico ponto em que uma etapa realmente depende do
+    # resultado das outras.
+    needs: [qualidade, imagem, sonar, seguranca]
+    # `always()` combinado com os testes explicitos e proposital. Sem ele, um job
+    # PULADO (sonar desligado, imagem vazia) conta como nao-sucesso e o deploy
+    # nunca acontece; com `always()` sozinho, um job FALHO nao impediria nada.
+    # Entao: roda sempre, e exige que nenhum dos quatro tenha falhado ou sido
+    # cancelado — pulado esta liberado, falho nao.
+    if: >-
+      always()
+      && inputs.app != ''
+      && github.ref == format('refs/heads/{0}', inputs.branch_de_producao)
+      && needs.qualidade.result == 'success'
+      && needs.seguranca.result == 'success'
+      && needs.imagem.result == 'success'
+      && (needs.sonar.result == 'success' || needs.sonar.result == 'skipped')
+    permissions:
+      contents: read
+    uses: slipalison/github-workflows/.github/workflows/deploy.yml@main
+    with:
+      app: ${{ inputs.app }}
+      tag: ${{ needs.imagem.outputs.tag }}
+      gitops_repo: ${{ inputs.gitops_repo }}
+    secrets:
+      GITOPS_SSH_KEY: ${{ secrets.GITOPS_SSH_KEY }}
+      GITOPS_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+
+  # Um unico check para marcar como obrigatorio na protecao de branch. Sem isto
+  # a lista de checks obrigatorios precisa nomear cada job, e um job novo entra
+  # sem ser exigido — protecao que se afrouxa sozinha a cada mudanca.
+  portao:
+    name: Portao
+    needs: [qualidade, imagem, sonar, seguranca]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Conferir os resultados
+        env:
+          RESULTADOS: |
+            qualidade=${{ needs.qualidade.result }}
+            imagem=${{ needs.imagem.result }}
+            sonar=${{ needs.sonar.result }}
+            seguranca=${{ needs.seguranca.result }}
+        run: |
+          set -euo pipefail
+          falhou=0
+          {
+            echo "## Portao"
+            echo ""
+            echo "| Etapa | Resultado |"
+            echo "|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          while IFS='=' read -r etapa resultado; do
+            if [ -z "$etapa" ]; then continue; fi
+            case "$resultado" in
+              success)  marca="ok" ;;
+              skipped)  marca="desligada" ;;
+              *)        marca="**$resultado**"; falhou=1 ;;
+            esac
+            echo "| $etapa | $marca |" >> "$GITHUB_STEP_SUMMARY"
+          done <<< "$RESULTADOS"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$falhou" = "1" ]; then
+            echo "::error::Uma ou mais etapas da esteira falharam."
+            exit 1
+          fi
+          echo "Todas as etapas passaram ou estao desligadas." >> "$GITHUB_STEP_SUMMARY"

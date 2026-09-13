@@ -1,0 +1,173 @@
+name: CI deste repositorio
+
+# Um repositorio de templates que nao se testa e um repositorio de templates
+# quebrado esperando a vez. Os erros que ja custaram caro aqui — uma tag de
+# action que nao existia (`@0.28.0` em vez de `@v0.28.0`), `secrets` usado num
+# `if:` de passo — nao aparecem em log de passo nenhum: o run morre em
+# `startup_failure`, sem saida, e o unico sinal e a tela do run.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  scripts:
+    name: Scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # `uses: ./...` exige o repositorio ja em disco, e quem faz o checkout e a
+      # propria action. Este checkout cru resolve o ovo-e-galinha: traz o
+      # arquivo, e a action roda em seguida — na versao DESTE pull request, que
+      # e o ponto de testar por caminho local em vez de @main.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Preparar
+        uses: ./.github/actions/preparar
+        with:
+          linguagem: python
+
+      - name: ruff
+        run: |
+          pip install ruff
+          ruff check bin/
+          ruff format --check bin/
+
+      - name: Provar os portoes nas DUAS cores
+        # O teste que importa nao e "o script roda": e "o script REPROVA quando
+        # deve". Um portao que nunca foi visto vermelho e um portao que ninguem
+        # sabe se funciona — e este repositorio ja teve um: o primeiro teste de
+        # "latest e bloqueado" escondia o stderr e passava sempre.
+        run: |
+          set -euo pipefail
+          tmp=$(mktemp -d)
+
+          cat > "$tmp/achados.sarif" <<'FIM'
+          {"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Teste","rules":[
+            {"id":"GRAVE","properties":{"security-severity":"9.1"}},
+            {"id":"LEVE","properties":{"security-severity":"3.0"}}]}},
+            "results":[
+              {"ruleId":"GRAVE","message":{"text":"acha"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"a.py"},"region":{"startLine":1}}}]},
+              {"ruleId":"LEVE","message":{"text":"leve"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"b.py"}}}]},
+              {"ruleId":"GRAVE","message":{"text":"suprimido"},"suppressions":[{"kind":"external"}]}
+            ]}]}
+          FIM
+          echo '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Teste"}},"results":[]}]}' > "$tmp/limpo.sarif"
+
+          echo "== SARIF: achado grave com portao error tem de REPROVAR =="
+          if python3 bin/resumo_sarif.py "$tmp/achados.sarif" --titulo t --bloquear error >/dev/null; then
+            echo "::error::portao SARIF nao reprovou com achado de severidade error"; exit 1
+          fi
+
+          echo "== SARIF: o mesmo arquivo com portao so em 'error' ignora o 'note' =="
+          python3 bin/resumo_sarif.py "$tmp/limpo.sarif" --titulo t --bloquear error >/dev/null
+
+          echo "== SARIF: achado suprimido NAO conta =="
+          total=$(python3 bin/resumo_sarif.py "$tmp/achados.sarif" --titulo t | grep -c "suprimido" || true)
+          if [ "$total" != "0" ]; then
+            echo "::error::achado com suppressions apareceu no relatorio"; exit 1
+          fi
+
+          echo "== Cobertura: soma PONDERADA por linha, e nao media de porcentagem =="
+          printf '<coverage lines-covered="20" lines-valid="20"/>' > "$tmp/peq.xml"
+          printf '<coverage lines-covered="1000" lines-valid="2000"/>' > "$tmp/gra.xml"
+          saida=$(python3 bin/cobertura.py "$tmp/peq.xml" "$tmp/gra.xml" --minimo 0)
+          echo "$saida" | grep -q "50.50%" || {
+            echo "::error::esperado 1020/2020 = 50,50%; a media ingenua daria 75%"
+            echo "$saida"; exit 1; }
+
+          echo "== Cobertura: piso acima do medido tem de REPROVAR =="
+          if python3 bin/cobertura.py "$tmp/gra.xml" --minimo 80 >/dev/null; then
+            echo "::error::piso de cobertura nao reprovou"; exit 1
+          fi
+
+          echo "== Cobertura: relatorio ausente com piso ligado tem de REPROVAR =="
+          if python3 bin/cobertura.py "$tmp/nao-existe.xml" --minimo 80 >/dev/null; then
+            echo "::error::ausencia de relatorio passou como sucesso — e o falso verde que o piso existe para impedir"
+            exit 1
+          fi
+
+          echo "== Cobertura: lcov lido corretamente =="
+          printf 'SF:a.js\nLF:100\nLH:90\nend_of_record\n' > "$tmp/c.info"
+          python3 bin/cobertura.py "$tmp/c.info" --minimo 90 >/dev/null
+
+          echo "Todos os portoes provados nas duas cores."
+
+  pins:
+    name: Pins das actions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # `uses: ./...` exige o repositorio ja em disco, e quem faz o checkout e a
+      # propria action. Este checkout cru resolve o ovo-e-galinha: traz o
+      # arquivo, e a action roda em seguida — na versao DESTE pull request, que
+      # e o ponto de testar por caminho local em vez de @main.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Preparar
+        uses: ./.github/actions/preparar
+        with:
+          linguagem: python
+
+      - name: Todo `uses:` esta fixado por SHA e bate com o lock
+        # Uma tag e um ponteiro movel: `actions/checkout@v4` nao diz qual codigo
+        # roda, diz o que o dono daquele repositorio estiver chamando de v4 hoje.
+        # Esse codigo roda com o GITHUB_TOKEN do run e ve os secrets do job.
+        run: python3 bin/pinar_actions.py --verificar
+
+  sintaxe:
+    name: Sintaxe dos workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # `uses: ./...` exige o repositorio ja em disco, e quem faz o checkout e a
+      # propria action. Este checkout cru resolve o ovo-e-galinha: traz o
+      # arquivo, e a action roda em seguida — na versao DESTE pull request, que
+      # e o ponto de testar por caminho local em vez de @main.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Preparar
+        uses: ./.github/actions/preparar
+
+      - name: actionlint
+        # Pega o que o YAML sozinho nao pega: contexto usado onde nao existe
+        # (`secrets` num `if:` de passo), `needs` para job inexistente, shell
+        # invalido. Sao exatamente as falhas que viram startup_failure sem log.
+        run: |
+          set -euo pipefail
+          versao=1.7.12
+          curl -sSfL "https://github.com/rhysd/actionlint/releases/download/v${versao}/actionlint_${versao}_linux_amd64.tar.gz" \
+            | tar -xz actionlint
+          ./actionlint -color .github/workflows/*.yml exemplos/*.yml
+
+      - name: Os exemplos apontam para workflows que existem
+        # Exemplo quebrado e pior que exemplo ausente: quem copia descobre na
+        # propria esteira, e culpa o proprio repositorio.
+        run: |
+          set -euo pipefail
+          faltou=0
+          while read -r referencia; do
+            caminho="${referencia#slipalison/github-workflows/}"
+            caminho="${caminho%@*}"
+            if [ ! -f "$caminho" ]; then
+              echo "::error::exemplo aponta para $caminho, que nao existe"
+              faltou=1
+            fi
+          done < <(grep -rhoE 'slipalison/github-workflows/[^@]+@[a-zA-Z0-9._-]+' exemplos/ .github/workflows/ | sort -u)
+          if [ "$faltou" = "1" ]; then exit 1; fi
+          echo "Todas as referencias internas resolvem."

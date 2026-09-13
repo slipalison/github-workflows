@@ -1,0 +1,43 @@
+# Repositorio PRIVADO. Duas coisas mudam, e as duas por causa de licenca:
+#
+#   1. Enviar SARIF para a aba Security exige GitHub Advanced Security, que em
+#      repositorio privado e pago. `publicar_sarif: auto` detecta isso sozinho e
+#      NAO tenta enviar — o que evitaria um 403 — sem desligar controle nenhum:
+#      o resultado continua no painel de cada job e os portoes continuam
+#      derrubando o run. Perde-se a aba, nao a verificacao.
+#
+#   2. SonarQube Cloud e gratuito so para projeto publico. `sonar_host` aponta
+#      para uma instancia propria de SonarQube. Enquanto ela nao existir, o
+#      honesto e `sonar_exigir_token: false` — que deixa o pulo VISIVEL no
+#      arquivo, em vez de um job verde que nao analisou nada.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  esteira:
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+      actions: read
+    uses: slipalison/github-workflows/.github/workflows/pipeline.yml@main
+    with:
+      componentes: '[{"nome":"app","linguagem":"node","versao":"22"}]'
+      publicar_sarif: auto
+      # CodeQL sem GHAS tambem nao publica em repositorio privado; deixar a lista
+      # vazia evita um job que roda por vinte minutos para descartar o resultado.
+      linguagens_codeql: '[]'
+      sonar_projeto: slipalison_investment-portfolio-balancer
+      sonar_host: https://sonarqube.alisonamorim.com
+      sonar_linguagem: node
+      sonar_exigir_token: false
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

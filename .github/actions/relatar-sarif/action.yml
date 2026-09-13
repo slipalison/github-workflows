@@ -1,0 +1,55 @@
+name: Relatar SARIF
+description: >-
+  Le um ou mais SARIF, escreve a tabela no painel do run e aplica o portao por
+  severidade. Substitui o bloco de `echo` que cada job de seguranca repetia.
+
+# O script vive em bin/resumo_sarif.py, na raiz deste repositorio. Como esta
+# action e usada de FORA (o workspace e o repositorio de quem chama), o caminho
+# sai de `github.action_path`, que aponta para a copia checada desta action —
+# e dai para a raiz do repositorio dela.
+
+inputs:
+  sarif:
+    description: "Caminho(s) do SARIF, separados por espaco"
+    required: true
+  titulo:
+    description: "Titulo da secao no painel"
+    required: true
+  bloquear:
+    description: >-
+      Nivel que derruba o job: error | warning | note | info | none.
+      Vazio = so relata. O padrao e vazio de proposito: ligar portao e decisao
+      de quem chama, e um portao ligado por engano ensina o time a desliga-lo.
+    required: false
+    default: ""
+  explicacao:
+    description: "Paragrafo explicando o que o teste cobre, no painel"
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Resumo e portao
+      shell: bash
+      env:
+        FERRAMENTAS: ${{ github.action_path }}/../../../bin
+        SARIF: ${{ inputs.sarif }}
+        TITULO: ${{ inputs.titulo }}
+        BLOQUEAR: ${{ inputs.bloquear }}
+        EXPLICACAO: ${{ inputs.explicacao }}
+      run: |
+        set -euo pipefail
+        args=("$FERRAMENTAS/resumo_sarif.py")
+        # Sem aspas de proposito: SARIF pode trazer varios caminhos.
+        # shellcheck disable=SC2206
+        args+=($SARIF)
+        args+=(--titulo "$TITULO")
+        # if/fi, e nao `[ -n "$X" ] && args+=(...)`. Com `set -e` o segundo so
+        # derruba o passo quando e a ULTIMA linha do script (o teste falso vira o
+        # codigo de saida do passo) — entao hoje, com o python3 logo abaixo, nao
+        # quebraria. E uma armadilha armada: basta alguem reordenar as linhas.
+        # if/fi nao tem esse estado.
+        if [ -n "$BLOQUEAR" ]; then args+=(--bloquear "$BLOQUEAR"); fi
+        if [ -n "$EXPLICACAO" ]; then args+=(--explicacao "$EXPLICACAO"); fi
+        python3 "${args[@]}"

@@ -1,0 +1,48 @@
+# Repositorio com backend .NET e dois frontends — a forma do `simulator-ccb`.
+#
+# Aqui os tres componentes viram tres jobs PARALELOS, cada um compilando e
+# testando de uma vez. No original sao seis jobs em tres pares serializados por
+# um `needs` que nao carrega artefato: o job de teste refaz o `restore` e o
+# `build` que o job anterior acabou de jogar fora.
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  esteira:
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+      actions: read
+    uses: slipalison/github-workflows/.github/workflows/pipeline.yml@main
+    with:
+      componentes: |
+        [
+          {"nome":"backend","linguagem":"dotnet","versao":"10.0.x",
+           "projeto":"Onboarding.slnx","cobertura":80},
+          {"nome":"frontend-client","linguagem":"node","versao":"24",
+           "projeto":"frontend-client"},
+          {"nome":"frontend-backoffice","linguagem":"node","versao":"24",
+           "projeto":"frontend-backoffice"}
+        ]
+      linguagens_codeql: '["csharp","javascript-typescript"]'
+      caminho_iac: "."
+      imagem: ghcr.io/slipalison/simulator-ccb
+      sonar_projeto: slipalison_simulator-ccb
+      sonar_modo: dotnet
+      sonar_projeto_dotnet: Onboarding.slnx
+      sonar_comando_testes: >-
+        dotnet test Onboarding.slnx -c Release --no-build
+        --collect:"XPlat Code Coverage;Format=opencover" --results-directory TestResults
+      sonar_parametros: |
+        sonar.cs.opencover.reportsPaths=**/TestResults/**/coverage.opencover.xml
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

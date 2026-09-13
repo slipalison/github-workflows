@@ -1,0 +1,256 @@
+name: Sonar
+
+# SonarQube / SonarQube Cloud, com Quality Gate travando o merge.
+#
+# O GUARD CONTRA O PULO SILENCIOSO
+# --------------------------------
+# Este e o melhor pedaco do `TranslateReader`, e esta aqui generalizado.
+#
+# O problema: `${{ secrets.SONAR_TOKEN }}` vazio nao da erro. Os passos que
+# dependem dele sao pulados, o job fica VERDE e o Quality Gate — que e um check
+# obrigatorio — passa sem ter analisado uma linha. O controle desaparece sem
+# deixar rastro, que e exatamente a familia de falha que este projeto ja pagou
+# caro duas vezes (o webhook do OTel com failurePolicy: Ignore, e a
+# NetworkPolicy que cortou o Alloy).
+#
+# A ausencia do token e legitima em dois casos e so nesses dois:
+#   - pull request vindo de fork, porque o GitHub nao expoe secret a fork;
+#   - run do Dependabot, que usa um cofre de secrets separado.
+# Em qualquer outro contexto, token ausente e configuracao quebrada e o job
+# FALHA dizendo isso.
+#
+# PUBLICO E PRIVADO
+# -----------------
+# SonarQube Cloud e gratuito para projeto publico e pago para privado. Por isso
+# `host` e entrada: repositorio privado aponta para uma instancia propria de
+# SonarQube (a do homelab, quando existir) sem mudar mais nada aqui. O que NAO
+# se faz e deixar privado sem analise nenhuma e fingir que o portao existe —
+# para isso ha `exigir_token: false`, que e explicito e aparece no diff.
+
+on:
+  workflow_call:
+    inputs:
+      projeto:
+        description: "sonar.projectKey, ex.: slipalison_demo-python"
+        required: true
+        type: string
+      organizacao:
+        description: "sonar.organization (SonarQube Cloud); vazio em instancia propria"
+        required: false
+        type: string
+        default: ""
+      host:
+        required: false
+        type: string
+        default: "https://sonarcloud.io"
+      modo:
+        description: >-
+          dotnet (usa dotnet-sonarscanner em volta do build, unico jeito de o
+          Sonar enxergar C#) | generico (scanner CLI, serve para Python, Node,
+          Go, e para qualquer repositorio sem compilacao)
+        required: false
+        type: string
+        default: "generico"
+      linguagem:
+        description: "Linguagem para preparar o runner no modo generico"
+        required: false
+        type: string
+        default: "nenhuma"
+      versao_linguagem:
+        required: false
+        type: string
+        default: ""
+      projeto_dotnet:
+        description: "Solucao ou csproj a compilar no modo dotnet"
+        required: false
+        type: string
+        default: ""
+      comando_testes:
+        description: >-
+          Comando que roda os testes E gera o relatorio de cobertura. Vazio
+          analisa sem cobertura — o Sonar aceita, mas a metrica de cobertura do
+          New Code fica em 0% e o Quality Gate reprova por isso.
+        required: false
+        type: string
+        default: ""
+      parametros:
+        description: "Linhas extras de sonar-project (uma `chave=valor` por linha)"
+        required: false
+        type: string
+        default: ""
+      exigir_token:
+        description: >-
+          Falha se o SONAR_TOKEN faltar num contexto que deveria te-lo.
+          Desligar e uma decisao consciente, e fica visivel no arquivo de quem
+          chamou — diferente de um job verde que nao analisou nada.
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      SONAR_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  sonar:
+    name: Sonar
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+    steps:
+      # PRIMEIRO passo, antes de qualquer checkout: se a configuracao esta
+      # quebrada, o run tem de morrer aqui e dizer por que, e nao quinze minutos
+      # depois numa tela verde.
+      - name: Conferir que a analise nao vai ser pulada em silencio
+        if: env.SONAR_TOKEN == ''
+        env:
+          # Ausencia legitima: fork (o GitHub nao da secret a fork) e Dependabot
+          # (cofre proprio). Fora disso, o token deveria estar aqui.
+          AUSENCIA_LEGITIMA: ${{ github.actor == 'dependabot[bot]' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) }}
+          EXIGIR: ${{ inputs.exigir_token }}
+        run: |
+          set -euo pipefail
+          if [ "$AUSENCIA_LEGITIMA" = "true" ]; then
+            echo "::warning::SONAR_TOKEN indisponivel (fork ou Dependabot). A analise e o Quality Gate NAO rodaram neste run — e nao ha o que consertar aqui."
+            exit 0
+          fi
+          if [ "$EXIGIR" != "true" ]; then
+            echo "::warning::SONAR_TOKEN ausente e exigir_token=false. A analise e o Quality Gate NAO rodaram."
+            exit 0
+          fi
+          echo "::error::SONAR_TOKEN ausente. A analise do Sonar e o Quality Gate NAO rodaram — e sem este passo o job ficaria VERDE sem ter examinado uma linha."
+          echo "::error::Crie o secret SONAR_TOKEN no repositorio, ou passe exigir_token: false se a ausencia for intencional."
+          exit 1
+
+      - name: Preparar
+        uses: slipalison/github-workflows/.github/actions/preparar@main
+        with:
+          linguagem: ${{ inputs.modo == 'dotnet' && 'dotnet' || inputs.linguagem }}
+          versao: ${{ inputs.versao_linguagem }}
+          # fetch-depth: 0 e obrigatorio. O Sonar usa o blame do git para saber
+          # que linha e "New Code"; com historico raso ele trata o repositorio
+          # inteiro como novo, e o Quality Gate de New Code passa a medir a
+          # coisa errada — normalmente reprovando um pull request de uma linha.
+          historico-completo: "true"
+
+      - name: Java (o scanner roda na JVM)
+        if: env.SONAR_TOKEN != ''
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # ------------------------------------------------------------- dotnet --
+      - name: Instalar dotnet-sonarscanner
+        if: env.SONAR_TOKEN != '' && inputs.modo == 'dotnet'
+        run: dotnet tool install --global dotnet-sonarscanner
+
+      - name: begin
+        if: env.SONAR_TOKEN != '' && inputs.modo == 'dotnet'
+        # TUDO o que e dinamico entra por `env`, e nada por interpolacao dentro
+        # do `run`. A diferenca nao e estilo: a interpolacao acontece no TEXTO do
+        # script antes de o bash ver a primeira linha, entao um valor que traga
+        # aspas ou substituicao de comando vira CODIGO. E `pull_request.head.ref`
+        # e o nome de uma branch — escolhido por quem abre o pull request,
+        # inclusive de um fork. Por `env` o valor e dado, nunca comando.
+        env:
+          PARAMETROS: ${{ inputs.parametros }}
+          PROJETO: ${{ inputs.projeto }}
+          HOST: ${{ inputs.host }}
+          ORGANIZACAO: ${{ inputs.organizacao }}
+          PR_NUMERO: ${{ github.event.pull_request.number }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+          PR_BASE: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          args=(/k:"$PROJETO"
+                /d:sonar.host.url="$HOST"
+                /d:sonar.token="$SONAR_TOKEN"
+                # qualitygate.wait vai na fase BEGIN, e nao na END. O
+                # SonarScanner for .NET recusa a chave no `end` com
+                # "This setting is not valid in the end phase in this version of
+                # the C# plugin" e sai 1 sem sequer consultar o portao — o que
+                # parece reprovacao e nao e.
+                /d:sonar.qualitygate.wait=true)
+          if [ -n "$ORGANIZACAO" ]; then
+            args+=(/o:"$ORGANIZACAO")
+          fi
+          if [ -n "$PR_NUMERO" ]; then
+            args+=(/d:sonar.pullrequest.key="$PR_NUMERO"
+                   /d:sonar.pullrequest.branch="$PR_BRANCH"
+                   /d:sonar.pullrequest.base="$PR_BASE")
+          fi
+          while IFS= read -r linha; do
+            if [ -n "$linha" ]; then args+=(/d:"$linha"); fi
+          done <<< "$PARAMETROS"
+          dotnet-sonarscanner begin "${args[@]}"
+
+      - name: Compilar
+        if: env.SONAR_TOKEN != '' && inputs.modo == 'dotnet'
+        run: dotnet build ${{ inputs.projeto_dotnet }} -c Release
+
+      - name: Testes com cobertura (dotnet)
+        if: env.SONAR_TOKEN != '' && inputs.modo == 'dotnet' && inputs.comando_testes != ''
+        run: ${{ inputs.comando_testes }}
+
+      - name: end
+        if: env.SONAR_TOKEN != '' && inputs.modo == 'dotnet'
+        run: dotnet-sonarscanner end /d:sonar.token="$SONAR_TOKEN"
+
+      # ------------------------------------------------------------ generico --
+      - name: Testes com cobertura (generico)
+        if: env.SONAR_TOKEN != '' && inputs.modo == 'generico' && inputs.comando_testes != ''
+        run: ${{ inputs.comando_testes }}
+
+      - name: Escrever sonar-project.properties
+        if: env.SONAR_TOKEN != '' && inputs.modo == 'generico'
+        env:
+          PARAMETROS: ${{ inputs.parametros }}
+          PROJETO: ${{ inputs.projeto }}
+          HOST: ${{ inputs.host }}
+          ORGANIZACAO: ${{ inputs.organizacao }}
+        run: |
+          set -euo pipefail
+          # Um arquivo em vez de uma pilha de -D: o scanner le os dois, mas o
+          # arquivo aparece inteiro no log e da para reproduzir na mao.
+          {
+            echo "sonar.projectKey=$PROJETO"
+            if [ -n "$ORGANIZACAO" ]; then
+              echo "sonar.organization=$ORGANIZACAO"
+            fi
+            echo "sonar.host.url=$HOST"
+            echo "sonar.qualitygate.wait=true"
+            echo "sonar.scm.provider=git"
+            printf '%s\n' "$PARAMETROS"
+          } > sonar-project.properties
+          echo "--- sonar-project.properties ---"
+          cat sonar-project.properties
+
+      - name: Analisar
+        if: env.SONAR_TOKEN != '' && inputs.modo == 'generico'
+        uses: SonarSource/sonarqube-scan-action@22918119ff8e1ca75a623e15c8296b6ea4fbe28f # v8.2.1
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ inputs.host }}
+
+      - name: Registrar o resultado no painel
+        if: always() && env.SONAR_TOKEN != ''
+        run: |
+          {
+            echo "## Sonar"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Projeto | \`${{ inputs.projeto }}\` |"
+            echo "| Instancia | ${{ inputs.host }} |"
+            echo "| Modo | ${{ inputs.modo }} |"
+            echo ""
+            echo "\`sonar.qualitygate.wait=true\`: o scanner espera o veredito do"
+            echo "Quality Gate e derruba este job se ele reprovar. Sem essa flag a"
+            echo "reprovacao so apareceria na interface do Sonar, depois do merge."
+          } >> "$GITHUB_STEP_SUMMARY"

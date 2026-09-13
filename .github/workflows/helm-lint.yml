@@ -13,18 +13,26 @@ on:
         # Tem de acompanhar o targetRevision do ApplicationSet no homelab-gitops.
         # Validar contra outra versao e pior que nao validar: passa no CI e
         # renderiza diferente no cluster.
-        default: "0.1.4"
+        default: "0.2.0"
       values:
         description: "Caminho do values a validar"
         required: true
         type: string
 
+permissions:
+  contents: read
+
 jobs:
   lint:
+    name: Helm
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
+      - name: Preparar
+        uses: slipalison/github-workflows/.github/actions/preparar@main
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
 
       - name: Renderizar com os valores reais
         # `helm lint` nao renderiza o template. Um erro que so aparece com os

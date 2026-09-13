@@ -1,0 +1,386 @@
+name: Seguranca
+
+# Seis varreduras, seis jobs, todos em paralelo. Nenhuma depende da outra e
+# nenhuma depende do build — entao nada aqui espera nada.
+#
+# O QUE ESTE ARQUIVO CORRIGE
+# --------------------------
+# O `simulator-ccb` acerta em rodar as varreduras em paralelo e erra no resto:
+# cada job termina com ~60 linhas de `echo` montando a mesma tabela a mao, e
+# antes disso quatro `python3 -c` de uma linha contando achados no mesmo JSON.
+# Dez jobs, dez copias. Todas aquelas ferramentas falam SARIF — entao ler,
+# contar e desenhar a tabela e UM problema. Aqui e `relatar-sarif`.
+#
+# REPOSITORIO PRIVADO
+# -------------------
+# Enviar SARIF para a aba Security exige GitHub Advanced Security, que num
+# repositorio privado e pago. Sem GHAS o `upload-sarif` FALHA. A saida obvia —
+# `continue-on-error: true` — devolve o pior dos mundos: sem aba, sem resumo, e
+# o job verde. Aqui o upload e condicional e o RESULTADO nao depende dele: o
+# `relatar-sarif` escreve o painel e aplica o portao de qualquer jeito. Num
+# repositorio privado perde-se a aba Security, nao o controle.
+
+on:
+  workflow_call:
+    inputs:
+      linguagens_codeql:
+        description: >-
+          JSON array para a matriz do CodeQL, ex.: '["csharp","javascript"]'.
+          Vazio desliga o CodeQL — que e o certo para repositorio sem codigo
+          compilavel que ele entenda, e melhor que um job que sempre falha.
+        required: false
+        type: string
+        default: '[]'
+      publicar_sarif:
+        description: "auto (publico sim, privado nao) | sempre | nunca"
+        required: false
+        type: string
+        default: "auto"
+      bloquear_sca:
+        description: "Nivel do portao de dependencia vulneravel"
+        required: false
+        type: string
+        default: "error"
+      bloquear_sast:
+        description: "Nivel do portao do Semgrep"
+        required: false
+        type: string
+        default: "error"
+      caminho_iac:
+        description: "Diretorio de IaC a varrer; vazio desliga o job"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  # Cinco segundos, sem checkout: so resolve as condicoes que TODOS os jobs
+  # abaixo consultariam. Sem isto a mesma expressao de tres linhas apareceria
+  # copiada em seis lugares — e uma copia desatualizada nao da erro, so muda o
+  # comportamento de um job em silencio.
+  contexto:
+    name: Contexto
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      publica_sarif: ${{ steps.calc.outputs.publica_sarif }}
+      e_privado: ${{ steps.calc.outputs.e_privado }}
+    steps:
+      - name: Resolver
+        id: calc
+        env:
+          MODO: ${{ inputs.publicar_sarif }}
+          PRIVADO: ${{ github.event.repository.private }}
+        run: |
+          set -euo pipefail
+          # `github.event.repository.private` vem vazio em alguns gatilhos
+          # (workflow_dispatch em certos contextos). Vazio e tratado como
+          # PRIVADO: errar para o lado de nao publicar apenas perde a aba;
+          # errar para o outro lado quebra o job com 403.
+          privado="${PRIVADO:-true}"
+          case "$MODO" in
+            sempre) publica=true ;;
+            nunca)  publica=false ;;
+            auto)   if [ "$privado" = "false" ]; then publica=true; else publica=false; fi ;;
+            *) echo "::error::publicar_sarif invalido: $MODO"; exit 1 ;;
+          esac
+          echo "publica_sarif=$publica" >> "$GITHUB_OUTPUT"
+          echo "e_privado=$privado" >> "$GITHUB_OUTPUT"
+          if [ "$publica" = "false" ]; then
+            echo "::notice::SARIF nao sera enviado a aba Security (repositorio privado sem GHAS, ou desligado). O resultado aparece no painel de cada job e os portoes continuam valendo."
+          fi
+
+  segredos-gitleaks:
+    name: Segredo - Gitleaks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Preparar
+        uses: slipalison/github-workflows/.github/actions/preparar@main
+        with:
+          # Segredo vazado continua no historico depois de removido do HEAD. Uma
+          # varredura so do ultimo commit acha o que acabou de entrar e perde o
+          # que ja esta la — que e justamente o que importa rotacionar.
+          historico-completo: "true"
+
+      - name: Gitleaks
+        # `detect` em vez da action oficial: a action exige GITHUB_TOKEN com
+        # escrita para comentar no PR, e este job roda com contents: read. O
+        # binario faz a mesma varredura e devolve SARIF.
+        run: |
+          set -euo pipefail
+          versao=8.30.1
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${versao}/gitleaks_${versao}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          # `|| true`: o gitleaks sai 1 quando acha algo, e quem decide se isso
+          # derruba o job e o portao do relatar-sarif, num lugar so.
+          ./gitleaks detect --source . --report-format sarif --report-path gitleaks.sarif --exit-code 0 || true
+
+      - name: Relatar
+        uses: slipalison/github-workflows/.github/actions/relatar-sarif@main
+        with:
+          sarif: gitleaks.sarif
+          titulo: "Segredo no historico - Gitleaks"
+          bloquear: error
+          explicacao: >-
+            Varre TODO o historico, nao so o commit atual. Um segredo removido do
+            HEAD continua acessivel em qualquer clone. Achado aqui significa
+            rotacionar a credencial, nao so apagar a linha.
+
+  segredos-trufflehog:
+    name: Segredo - TruffleHog
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Preparar
+        uses: slipalison/github-workflows/.github/actions/preparar@main
+        with:
+          historico-completo: "true"
+
+      - name: TruffleHog
+        uses: trufflesecurity/trufflehog@363923b901c911a9164f50b6c423f47c15372b1c # v3.97.4
+        with:
+          # base vazio varre o historico inteiro. Com base == head — o que
+          # acontece num push de commit unico — o intervalo fica vazio e a action
+          # falha em vez de varrer.
+          base: ""
+          # --only-verified: o TruffleHog CONFIRMA a credencial contra o servico
+          # antes de reportar. Sem isto o ruido e tao alto que o job vira
+          # decoracao; com isto, cada achado e uma chave que funciona agora.
+          extra_args: --only-verified
+
+  sast-semgrep:
+    name: SAST - Semgrep
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    needs: contexto
+    steps:
+      - name: Preparar
+        uses: slipalison/github-workflows/.github/actions/preparar@main
+        with:
+          linguagem: python
+
+      - name: Instalar Semgrep
+        # Versao fixa: `pip install semgrep` traz regra nova sem commit, e uma
+        # regra nova reprova um pull request que nao mudou nada.
+        run: pip install --only-binary ':all:' semgrep==1.177.0
+
+      - name: Varrer
+        # Uma unica passada, SARIF. O simulator-ccb roda o semgrep DUAS vezes
+        # (uma para JSON, outra para SARIF) para poder contar os achados — e a
+        # contagem sai do proprio SARIF.
+        run: |
+          set -euo pipefail
+          configs=(--config auto)
+          if [ -d .semgrep ]; then configs+=(--config .semgrep/); fi
+          semgrep scan "${configs[@]}" --sarif --output semgrep.sarif --metrics=off || true
+
+      - name: Enviar para a aba Security
+        if: always() && needs.contexto.outputs.publica_sarif == 'true' && hashFiles('semgrep.sarif') != ''
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+      - name: Relatar
+        if: always()
+        uses: slipalison/github-workflows/.github/actions/relatar-sarif@main
+        with:
+          sarif: semgrep.sarif
+          titulo: "SAST - Semgrep"
+          bloquear: ${{ inputs.bloquear_sast }}
+          explicacao: >-
+            Analise estatica por padrao, rapida. Complementa o CodeQL em vez de
+            repeti-lo: o CodeQL segue fluxo de dados e leva minutos; o Semgrep
+            casa forma e leva segundos, e aceita regra propria do projeto em
+            `.semgrep/`.
+
+  sast-codeql:
+    name: SAST - CodeQL (${{ matrix.linguagem }})
+    if: inputs.linguagens_codeql != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    needs: contexto
+    strategy:
+      fail-fast: false
+      matrix:
+        linguagem: ${{ fromJSON(inputs.linguagens_codeql) }}
+    steps:
+      # O CodeQL publica o resultado na aba Security como parte do `analyze` —
+      # nao da para separar. Sem GHAS, num repositorio privado, isso falha com
+      # 403 depois de a analise inteira ter rodado: vinte minutos para descobrir
+      # um problema de licenca. Este passo custa cinco segundos e diz o que
+      # fazer.
+      - name: Conferir que o resultado tem onde ser publicado
+        if: needs.contexto.outputs.publica_sarif != 'true'
+        run: |
+          echo "::error::CodeQL esta ligado (linguagens_codeql), mas este run nao pode publicar SARIF — repositorio privado sem GitHub Advanced Security, ou publicar_sarif desligado."
+          echo '::error::O passo analyze do CodeQL publica na aba Security e nao tem modo so-relatorio: ou se habilita o GHAS, ou se passa linguagens_codeql vazio e se usa o Semgrep, que ja roda e cujo resultado aparece no painel.'
+          exit 1
+
+      - name: Preparar
+        uses: slipalison/github-workflows/.github/actions/preparar@main
+
+      - name: Iniciar CodeQL
+        uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          languages: ${{ matrix.linguagem }}
+          # build-mode: none — nao compila. Para C# isto perde um pouco de
+          # precisao e ganha o job inteiro: com build, o CodeQL precisa do SDK,
+          # das dependencias privadas e do tempo de build, e passa a quebrar por
+          # motivo que nao tem nada a ver com seguranca.
+          build-mode: none
+          queries: security-extended
+
+      - name: Analisar
+        uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          category: "/language:${{ matrix.linguagem }}"
+          # upload-database: false — a base do CodeQL de repositorio privado nao
+          # deve sair daqui.
+          upload-database: false
+
+  sca-dependencias:
+    name: SCA - dependencias
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    needs: contexto
+    steps:
+      - name: Preparar
+        uses: slipalison/github-workflows/.github/actions/preparar@main
+
+      - name: Trivy no sistema de arquivos
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-fs.sarif
+          # ignore-unfixed: um CVE sem correcao disponivel nao e acionavel —
+          # bloquear por ele so ensina a usar `--skip`. Volta a aparecer no dia
+          # em que houver patch.
+          ignore-unfixed: true
+          scanners: vuln,secret,misconfig
+          exit-code: "0"
+
+      - name: Enviar para a aba Security
+        if: always() && needs.contexto.outputs.publica_sarif == 'true' && hashFiles('trivy-fs.sarif') != ''
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+
+      - name: Relatar
+        if: always()
+        uses: slipalison/github-workflows/.github/actions/relatar-sarif@main
+        with:
+          sarif: trivy-fs.sarif
+          titulo: "SCA - dependencia vulneravel"
+          bloquear: ${{ inputs.bloquear_sca }}
+          explicacao: >-
+            Le os arquivos de dependencia do repositorio (requirements, csproj,
+            package-lock, go.mod) e cruza com as bases publicas de CVE. Roda
+            antes da imagem existir — e barato e pega o problema no lugar onde
+            ele se conserta, que e o arquivo de dependencia.
+
+  iac:
+    name: IaC
+    if: inputs.caminho_iac != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+    needs: contexto
+    steps:
+      - name: Preparar
+        uses: slipalison/github-workflows/.github/actions/preparar@main
+
+      - name: Trivy em configuracao
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: ${{ inputs.caminho_iac }}
+          format: sarif
+          output: trivy-iac.sarif
+          exit-code: "0"
+
+      - name: Enviar para a aba Security
+        if: always() && needs.contexto.outputs.publica_sarif == 'true' && hashFiles('trivy-iac.sarif') != ''
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          sarif_file: trivy-iac.sarif
+          category: trivy-iac
+
+      - name: Relatar
+        if: always()
+        uses: slipalison/github-workflows/.github/actions/relatar-sarif@main
+        with:
+          sarif: trivy-iac.sarif
+          titulo: "IaC - Dockerfile, manifesto e Helm"
+          bloquear: ""
+          explicacao: >-
+            Le Dockerfile, manifesto de Kubernetes e chart em busca de
+            configuracao insegura (container como root, capability a mais, sem
+            limite de recurso). Sem portao de proposito: o cluster ja recusa o
+            que importa pelo Kyverno e pelo Pod Security `restricted`, entao
+            aqui isto e diagnostico, e nao um segundo dono da mesma regra.
+
+  sbom:
+    name: SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Preparar
+        uses: slipalison/github-workflows/.github/actions/preparar@main
+
+      - name: Gerar SBOM (SPDX)
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          path: .
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false
+
+      - name: Guardar
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-spdx
+          path: sbom.spdx.json
+          retention-days: 90
+
+      - name: Resumo
+        run: |
+          set -euo pipefail
+          total=$(python3 -c "import json;print(len(json.load(open('sbom.spdx.json')).get('packages',[])))")
+          {
+            echo "## SBOM"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Pacotes catalogados | ${total} |"
+            echo "| Formato | SPDX 2.3 (JSON) |"
+            echo "| Artefato | \`sbom-spdx\`, 90 dias |"
+            echo ""
+            echo "A lista de tudo que entrou no build. Serve para responder"
+            echo "\"estamos expostos?\" no dia em que sair um CVE novo — sem SBOM"
+            echo "essa pergunta vira arqueologia em cada repositorio."
+          } >> "$GITHUB_STEP_SUMMARY"

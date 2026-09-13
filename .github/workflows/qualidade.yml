@@ -1,0 +1,176 @@
+name: Qualidade
+
+# Lint, testes e cobertura — um job POR COMPONENTE, todos em paralelo.
+#
+# O QUE ESTE ARQUIVO CORRIGE
+# --------------------------
+# O `simulator-ccb` tem `backend-build` e, com `needs: backend-build`,
+# `backend-tests`. O job de build nao sobe artefato nenhum — entao o de teste
+# refaz `restore` e `build` do zero. O `needs` ali nao economiza trabalho: ele
+# so SERIALIZA dois builds identicos. O mesmo acontece com os dois frontends.
+# Sao tres pares, seis builds, tres esperas — para nada.
+#
+# Aqui build e teste vivem no MESMO job (o build ja e pre-requisito do teste,
+# nao ha o que paralelizar entre eles) e o que corre em paralelo sao os
+# COMPONENTES, que de fato nao dependem um do outro.
+#
+# Um componente e um objeto JSON:
+#   nome         rotulo do job e do artefato
+#   linguagem    dotnet | python | node | go
+#   versao       opcional; vazio = padrao da action `preparar`
+#   caminho      diretorio de trabalho, padrao "."
+#   projeto      dotnet: .sln/.slnx/.csproj | node: workspace | go: ./...
+#   cobertura    piso em %; 0 (padrao) desliga o portao daquele componente
+
+on:
+  workflow_call:
+    inputs:
+      componentes:
+        description: "JSON array de componentes. Ver o cabecalho deste arquivo."
+        required: false
+        type: string
+        default: '[{"nome":"app","linguagem":"python"}]'
+      timeout:
+        required: false
+        type: number
+        default: 20
+
+permissions:
+  contents: read
+
+jobs:
+  qualidade:
+    # `nome` no rotulo: com matriz, sem isto a tela mostra "qualidade (Object)"
+    # em todos os jobs e nao da para saber qual falhou sem abrir cada um.
+    name: ${{ matrix.c.nome }}
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout }}
+    permissions:
+      contents: read
+    strategy:
+      # fail-fast: false. O padrao mata os outros componentes quando um falha, e
+      # aparece so o primeiro erro; com tres componentes isso vira tres rodadas
+      # de CI para descobrir tres problemas que dava para ver de uma vez.
+      fail-fast: false
+      matrix:
+        c: ${{ fromJSON(inputs.componentes) }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.c.caminho || '.' }}
+    steps:
+      - name: Preparar
+        uses: slipalison/github-workflows/.github/actions/preparar@main
+        with:
+          linguagem: ${{ matrix.c.linguagem }}
+          versao: ${{ matrix.c.versao || '' }}
+
+      # ---------------------------------------------------------------- dotnet
+      - name: dotnet restore
+        if: matrix.c.linguagem == 'dotnet'
+        run: dotnet restore ${{ matrix.c.projeto || '' }}
+
+      - name: dotnet build
+        if: matrix.c.linguagem == 'dotnet'
+        # --no-restore para que o passo de cima signifique alguma coisa: sem
+        # isto o build restaura de novo e o cache nao aparece no tempo.
+        run: dotnet build ${{ matrix.c.projeto || '' }} -c Release --no-restore
+
+      - name: dotnet test
+        if: matrix.c.linguagem == 'dotnet'
+        run: |
+          dotnet test ${{ matrix.c.projeto || '' }} -c Release --no-build \
+            --logger "trx;LogFileName=testes.trx" \
+            --collect:"XPlat Code Coverage" \
+            --results-directory ./resultados
+
+      # ---------------------------------------------------------------- python
+      - name: Instalar dependencias
+        if: matrix.c.linguagem == 'python'
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          if [ -f pyproject.toml ]; then
+            pip install -e ".[dev]" 2>/dev/null || pip install -e . 2>/dev/null || true
+          fi
+          for arquivo in requirements.txt requirements-dev.txt; do
+            if [ -f "$arquivo" ]; then pip install -r "$arquivo"; fi
+          done
+          pip install ruff pytest pytest-cov
+
+      - name: ruff check
+        if: matrix.c.linguagem == 'python'
+        # `check` e `format --check` em passos separados: a mensagem de falha
+        # diz qual dos dois foi, e sao coisas diferentes — um e defeito de
+        # codigo, o outro e formatacao.
+        run: ruff check .
+
+      - name: ruff format --check
+        if: matrix.c.linguagem == 'python'
+        run: ruff format --check .
+
+      - name: pytest
+        if: matrix.c.linguagem == 'python'
+        run: pytest -q --cov --cov-report=xml:resultados/coverage.xml
+
+      # ------------------------------------------------------------------ node
+      - name: npm ci
+        if: matrix.c.linguagem == 'node'
+        env:
+          HUSKY: "0"
+        run: npm ci
+
+      - name: npm run build
+        if: matrix.c.linguagem == 'node'
+        run: |
+          set -euo pipefail
+          if [ -n "${{ matrix.c.projeto || '' }}" ]; then
+            npm run build -w "${{ matrix.c.projeto }}"
+          else
+            npm run build --if-present
+          fi
+
+      - name: npm test
+        if: matrix.c.linguagem == 'node'
+        run: npm test --if-present
+
+      # -------------------------------------------------------------------- go
+      - name: go vet
+        if: matrix.c.linguagem == 'go'
+        run: go vet ${{ matrix.c.projeto || './...' }}
+
+      - name: go test
+        if: matrix.c.linguagem == 'go'
+        run: |
+          mkdir -p resultados
+          go test ${{ matrix.c.projeto || './...' }} -race -coverprofile=resultados/cobertura.out
+          # O portao le cobertura.xml/opencover/lcov; o Go escreve um formato
+          # proprio. gocover-cobertura e a ponte, e e a mesma ponte que o
+          # SonarQube usa para Go.
+          go run github.com/boumenot/gocover-cobertura@latest \
+            < resultados/cobertura.out > resultados/coverage.xml
+
+      # --------------------------------------------------------------- comum --
+      - name: Cobertura
+        # `always()`: sem isto, teste vermelho pula o relatorio e some a unica
+        # tela que diz o quanto do codigo foi exercitado antes de quebrar.
+        if: always()
+        uses: slipalison/github-workflows/.github/actions/relatar-cobertura@main
+        with:
+          relatorios: >-
+            ${{ matrix.c.caminho || '.' }}/resultados/**/coverage.xml
+            ${{ matrix.c.caminho || '.' }}/resultados/**/coverage.cobertura.xml
+            ${{ matrix.c.caminho || '.' }}/resultados/**/*.opencover.xml
+            ${{ matrix.c.caminho || '.' }}/resultados/**/lcov.info
+            ${{ matrix.c.caminho || '.' }}/coverage/lcov.info
+          minimo: ${{ matrix.c.cobertura || 0 }}
+
+      - name: Guardar resultados
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: resultados-${{ matrix.c.nome }}
+          path: |
+            ${{ matrix.c.caminho || '.' }}/resultados
+            ${{ matrix.c.caminho || '.' }}/coverage
+          retention-days: 7
+          if-no-files-found: ignore

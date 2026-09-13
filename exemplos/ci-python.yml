@@ -1,0 +1,47 @@
+# Copiar para .github/workflows/ci.yml no repositorio da aplicacao.
+#
+# E ISTO. A esteira inteira — lint, testes, cobertura, imagem com portao de
+# vulnerabilidade, seis varreduras de seguranca, Sonar com Quality Gate e o
+# commit no GitOps — cabe aqui porque a orquestracao mora em
+# slipalison/github-workflows e nao em copia.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancela o run anterior da MESMA branch quando chega commit novo. Sem isto,
+# tres pushes seguidos rodam tres esteiras completas em paralelo e a primeira,
+# ja obsoleta, ainda pode escrever no GitOps.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  esteira:
+    # OBRIGATORIO declarar aqui. Um workflow reutilizavel nunca recebe mais
+    # permissao do que quem o chama concede, e o padrao desta conta e leitura.
+    # Sem `packages: write` o run morre em startup_failure com
+    # "requesting 'packages: write', but is only allowed 'packages: read'" — que
+    # nao aparece no log de passo nenhum, so na tela do run.
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+      actions: read
+    uses: slipalison/github-workflows/.github/workflows/pipeline.yml@main
+    with:
+      componentes: '[{"nome":"app","linguagem":"python","cobertura":80}]'
+      imagem: ghcr.io/slipalison/meu-app
+      app: meu-app
+      sonar_projeto: slipalison_meu-app
+      sonar_linguagem: python
+      sonar_comando_testes: "pip install -r requirements.txt pytest pytest-cov && pytest --cov --cov-report=xml"
+      sonar_parametros: |
+        sonar.python.coverage.reportPaths=coverage.xml
+        sonar.sources=app
+        sonar.tests=tests
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      GITOPS_SSH_KEY: ${{ secrets.GITOPS_SSH_KEY }}

@@ -1,0 +1,37 @@
+name: Relatar cobertura
+description: >-
+  Soma os relatorios de cobertura (cobertura.xml, opencover.xml, lcov.info),
+  escreve o painel e aplica o piso.
+
+inputs:
+  relatorios:
+    description: "Caminho(s) ou glob(s) dos relatorios, separados por espaco"
+    required: true
+  minimo:
+    description: "Piso em porcentagem de linhas. 0 desliga a exigencia"
+    required: false
+    default: "0"
+
+runs:
+  using: composite
+  steps:
+    - name: Somar, relatar e aplicar o piso
+      shell: bash
+      env:
+        FERRAMENTAS: ${{ github.action_path }}/../../../bin
+        RELATORIOS: ${{ inputs.relatorios }}
+        MINIMO: ${{ inputs.minimo }}
+      run: |
+        set -euo pipefail
+        # globstar para que `**/coverage.xml` case em subdiretorio: o coverlet
+        # escreve o arquivo dentro de um diretorio de GUID que muda a cada run,
+        # entao caminho fixo nunca acerta.
+        shopt -s globstar nullglob
+        # shellcheck disable=SC2206
+        alvos=($RELATORIOS)
+        if [ ${#alvos[@]} -eq 0 ]; then
+          echo "::error::Nenhum relatorio casou com: $RELATORIOS"
+          if [ "$MINIMO" != "0" ]; then exit 1; fi
+          exit 0
+        fi
+        python3 "$FERRAMENTAS/cobertura.py" "${alvos[@]}" --minimo "$MINIMO"
