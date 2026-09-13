@@ -1,7 +1,17 @@
 name: Exemplo — CI completo de um app
 
 # Este arquivo nao roda aqui: e o que se copia para .github/workflows/ci.yml no
-# repositorio de uma aplicacao.
+# repositorio de uma aplicacao. Trocar 'meu-app' nos dois lugares.
+#
+# ANTES DE FUNCIONAR, tres coisas fora daqui (detalhe no README):
+#   1. apps/meu-app/values.yaml tem de existir no repositorio de GitOps — o
+#      deploy falha de proposito se nao existir, porque quem define o que um app
+#      e nao e o pipeline;
+#   2. o secret GITOPS_TOKEN neste repositorio, fine-grained, com Contents:
+#      Read and write APENAS no repositorio de GitOps;
+#   3. o pacote da imagem acessivel ao cluster — se for privado no GHCR e nao
+#      houver imagePullSecret, o pod fica em ImagePullBackOff dizendo que nao
+#      encontrou a imagem, o que nao parece um problema de credencial.
 on:
   workflow_dispatch:
 
