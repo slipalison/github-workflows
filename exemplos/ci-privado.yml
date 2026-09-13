@@ -24,7 +24,9 @@ concurrency:
 jobs:
   esteira:
     permissions:
-      contents: read
+      # `contents: write` para a tag e a release da versao; `packages: write`
+      # para a imagem e o alias :<versao>.
+      contents: write
       packages: write
       security-events: write
       actions: read

@@ -1,0 +1,220 @@
+name: Lancar versao
+
+# O ultimo job da esteira, e o unico que cria alguma coisa com o token do
+# repositorio: o alias da imagem, a tag, a release. Roda depois de TODOS os
+# portoes e depois do GitOps, so na main. A tag e a prova de que aquele commit
+# passou por tudo e chegou ao cluster — por isso nasce por ultimo.
+#
+# SO GITHUB_TOKEN, NENHUM PAT
+# ---------------------------
+# Tag e release criadas com o GITHUB_TOKEN nao disparam outros workflows
+# (`on: push: tags` fica surdo). Nao e problema: tudo o que precisa da versao
+# acontece NESTE run. A alternativa — um PAT para "acordar" outro workflow — e
+# uma credencial de conta inteira, permanente, guardada em secret. E o que o
+# release-please pede, e o que este desenho evita.
+#
+# IDEMPOTENTE POR CONSTRUCAO
+# --------------------------
+# A versao e recalculada aqui e comparada com a que o job `versao` calculou no
+# inicio do run. Se entrou tag ou commit no meio, os dois numeros divergem e o
+# job reprova sem criar nada. Um run cancelado pelo `cancel-in-progress` nao
+# deixa tag, e o proximo chega ao mesmo numero sozinho.
+
+on:
+  workflow_call:
+    inputs:
+      versao:
+        description: "Versao calculada pelo job versao (1.4.0)"
+        required: true
+        type: string
+      tag:
+        description: "A mesma como tag (v1.4.0)"
+        required: true
+        type: string
+      imagem:
+        description: "Imagem sem tag, para receber o alias :<versao>. Vazio pula."
+        required: false
+        type: string
+        default: ""
+      digest:
+        description: "Digest da imagem publicada (sha256:...). O alias aponta para ele."
+        required: false
+        type: string
+        default: ""
+      tag_movel_major:
+        description: >-
+          Tambem aponta a tag vN (v1, v2) para este commit, como fazem as actions
+          do GitHub. Para repositorio de templates e actions; sem sentido para
+          servico.
+        required: false
+        type: boolean
+        default: false
+      commits_sem_tipo:
+        required: false
+        type: string
+        default: "reprovar"
+      versao_inicial:
+        required: false
+        type: string
+        default: "1.0.0"
+
+permissions:
+  contents: read
+
+jobs:
+  alias:
+    name: Alias da imagem
+    if: inputs.imagem != '' && inputs.digest != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Endurecer o runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: block
+          allowed-endpoints: >-
+            ghcr.io:443
+            pkg-containers.githubusercontent.com:443
+            api.github.com:443
+
+      - name: Conferir as entradas
+        # O nome da imagem e o digest vao para uma linha de comando. Sao saidas
+        # de outro job da mesma esteira, mas um `[[ =~ ]]` custa nada e fecha a
+        # porta para sempre.
+        env:
+          IMAGEM: ${{ inputs.imagem }}
+          DIGEST: ${{ inputs.digest }}
+          VERSAO: ${{ inputs.versao }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGEM" =~ ^[a-z0-9][a-z0-9._/-]*$ ]] || { echo "::error::imagem invalida: $IMAGEM"; exit 1; }
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::digest invalido: $DIGEST"; exit 1; }
+          [[ "$VERSAO" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::versao invalida: $VERSAO"; exit 1; }
+
+      - name: Login no GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Apontar :<versao> para o digest
+        # Nao reconstroi nada: cria uma tag nova no registro apontando para o
+        # MESMO manifesto que `sha-<commit>`. A identidade que o cluster usa
+        # continua sendo o sha; a versao e um nome legivel para o mesmo bit.
+        env:
+          IMAGEM: ${{ inputs.imagem }}
+          DIGEST: ${{ inputs.digest }}
+          VERSAO: ${{ inputs.versao }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --tag "$IMAGEM:$VERSAO" "$IMAGEM@$DIGEST"
+          {
+            echo "## Alias da imagem"
+            echo ""
+            echo "\`$IMAGEM:$VERSAO\` -> \`$DIGEST\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  lancar:
+    name: Tag e release
+    needs: [alias]
+    # `always()` porque o alias e opcional (repositorio sem imagem): pulado esta
+    # liberado, falho nao.
+    if: always() && (needs.alias.result == 'success' || needs.alias.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Preparar
+        uses: slipalison/github-workflows/.github/actions/preparar@main
+        with:
+          historico-completo: "true"
+          # Este job segura um token com escrita no repositorio. Como no deploy,
+          # a saida de rede e uma lista fechada.
+          egresso: block
+          destinos-liberados: |
+            github.com:443
+            api.github.com:443
+
+      - name: Conferir as entradas
+        env:
+          VERSAO: ${{ inputs.versao }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSAO" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::versao invalida: $VERSAO"; exit 1; }
+          [ "$TAG" = "v$VERSAO" ] || { echo "::error::tag $TAG nao corresponde a versao $VERSAO"; exit 1; }
+
+      - name: Recalcular e conferir
+        # Mesmo script, mesma resposta — ou o run para aqui.
+        id: calc
+        uses: slipalison/github-workflows/.github/actions/versao@main
+        with:
+          commits-sem-tipo: ${{ inputs.commits_sem_tipo }}
+          versao-inicial: ${{ inputs.versao_inicial }}
+          esperada: ${{ inputs.versao }}
+
+      - name: A tag ainda nao existe?
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/$GH_REPO/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            echo "::error::A tag $TAG ja existe. Nada foi criado."
+            exit 1
+          fi
+
+      - name: Criar a tag e a release
+        # `gh release create` cria a tag no commit alvo e a release de uma vez,
+        # com as notas geradas dos commits. As notas entram por ARQUIVO: assunto
+        # de commit e texto de terceiro, e nunca passa por uma linha de comando.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+          VERSAO: ${{ inputs.versao }}
+          NOTAS: ${{ steps.calc.outputs.notas }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" --target "$SHA" --title "$VERSAO" --notes-file "$NOTAS"
+          echo "Release $TAG criada em $SHA."
+
+      - name: Mover a tag de major
+        if: inputs.tag_movel_major
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSAO: ${{ inputs.versao }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          movel="v${VERSAO%%.*}"
+          if gh api "repos/$GH_REPO/git/ref/tags/$movel" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/$GH_REPO/git/refs/tags/$movel" -f sha="$SHA" -F force=true >/dev/null
+          else
+            gh api -X POST "repos/$GH_REPO/git/refs" -f ref="refs/tags/$movel" -f sha="$SHA" >/dev/null
+          fi
+          echo "$movel -> $SHA"
+
+      - name: Resumo
+        env:
+          TAG: ${{ inputs.tag }}
+          REPO: ${{ github.repository }}
+          MOVEL: ${{ inputs.tag_movel_major }}
+          VERSAO: ${{ inputs.versao }}
+        run: |
+          {
+            echo "## Lancamento"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Release | [$TAG](https://github.com/$REPO/releases/tag/$TAG) |"
+            if [ "$MOVEL" = "true" ]; then echo "| Tag movel | v${VERSAO%%.*} |"; fi
+          } >> "$GITHUB_STEP_SUMMARY"

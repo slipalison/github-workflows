@@ -1,0 +1,119 @@
+name: Versao
+
+# Decide a proxima versao a partir dos commits. Nao cria tag, nao publica nada:
+# so calcula e reprova. Quem cria a tag e lancar.yml, no fim da esteira, depois
+# de todos os portoes — e so na main.
+#
+# O QUE E AUTOMATICO E O QUE NAO E
+# --------------------------------
+# A esteira calcula o numero, cria a tag, a release, o alias da imagem e leva a
+# versao ao GitOps. O que ela NAO consegue e adivinhar se uma mudanca quebra
+# contrato: nenhuma ferramenta faz isso para qualquer linguagem. Esse unico bit
+# vem da mensagem do commit, no padrao Conventional Commits:
+#
+#     feat!: ...  ou rodape BREAKING CHANGE:   -> major
+#     feat: ...                                -> minor
+#     fix:, docs:, chore:, ci:, ...            -> patch
+#
+# Por isso o padrao e ESTRITO: commit fora do formato reprova este job, e com
+# ele o portao e a publicacao. Um commit sem tipo que virasse patch em silencio
+# seria uma quebra de contrato publicada como correcao.
+#
+# REPROVA O QUE ENTROU AGORA, LISTA O QUE JA ESTAVA
+# -------------------------------------------------
+# Com commit direto na main, o commit ruim ja entrou quando o run reprova. Ele
+# nao sai sem reescrever historico, entao a reprovacao vale para os commits
+# DESTE push (ou deste pull request). Os anteriores aparecem nas notas como
+# "sem tipo" e nao contam para o salto. Sem isso, um unico commit errado
+# travaria a esteira ate alguem fazer force-push na main.
+#
+# EM PULL REQUEST
+# ---------------
+# Calcula e mostra no painel do run o que a mudanca vai virar ("1.4.0, minor:
+# 2 feat, 1 fix"). Nada e criado.
+
+on:
+  workflow_call:
+    inputs:
+      commits_sem_tipo:
+        description: "reprovar | patch | ignorar"
+        required: false
+        type: string
+        default: "reprovar"
+      versao_inicial:
+        description: "Primeira versao, quando o repositorio nao tem tag vX.Y.Z"
+        required: false
+        type: string
+        default: "1.0.0"
+    outputs:
+      versao:
+        description: "Proxima versao (1.4.0)"
+        value: ${{ jobs.versao.outputs.versao }}
+      tag:
+        description: "A mesma como tag (v1.4.0)"
+        value: ${{ jobs.versao.outputs.tag }}
+      anterior:
+        description: "Tag anterior, ou vazio"
+        value: ${{ jobs.versao.outputs.anterior }}
+      salto:
+        description: "major | minor | patch | inicial | nenhum"
+        value: ${{ jobs.versao.outputs.salto }}
+
+permissions:
+  contents: read
+
+jobs:
+  versao:
+    name: Versao
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      versao: ${{ steps.calc.outputs.versao }}
+      tag: ${{ steps.calc.outputs.tag }}
+      anterior: ${{ steps.calc.outputs.anterior }}
+      salto: ${{ steps.calc.outputs.salto }}
+    steps:
+      - name: Preparar
+        uses: slipalison/github-workflows/.github/actions/preparar@main
+        with:
+          # Sem historico e sem tags nao ha de onde contar.
+          historico-completo: "true"
+
+      # A faixa "novos" e o que este push (ou PR) trouxe. So ela reprova.
+      #
+      # `github.event.before` e zero no primeiro push de um branch e pode nao
+      # existir localmente depois de um force-push; nos dois casos a faixa fica
+      # vazia e TODOS os commits desde a tag contam como novos — o lado estrito
+      # do erro, que e o certo para um portao.
+      - name: Quais commits sao deste push?
+        id: faixa
+        env:
+          EVENTO: ${{ github.event_name }}
+          ANTES: ${{ github.event.before }}
+          BASE_PR: ${{ github.event.pull_request.base.sha }}
+          CABECA_PR: ${{ github.event.pull_request.head.sha }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          novos=""
+          case "$EVENTO" in
+            push)
+              if [ -n "$ANTES" ] && [ "$ANTES" != "0000000000000000000000000000000000000000" ] \
+                 && git cat-file -e "$ANTES" 2>/dev/null; then
+                novos="$ANTES..$SHA"
+              fi ;;
+            pull_request)
+              novos="$BASE_PR..$CABECA_PR" ;;
+          esac
+          echo "novos=$novos" >> "$GITHUB_OUTPUT"
+          echo "Faixa deste evento ($EVENTO): ${novos:-todos os commits desde a tag}"
+
+      - name: Calcular
+        id: calc
+        uses: slipalison/github-workflows/.github/actions/versao@main
+        with:
+          commits-sem-tipo: ${{ inputs.commits_sem_tipo }}
+          versao-inicial: ${{ inputs.versao_inicial }}
+          novos: ${{ steps.faixa.outputs.novos }}

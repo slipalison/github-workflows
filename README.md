@@ -2,13 +2,14 @@
 
 Esteira de CI/CD reutilizável. Um repositório de aplicação chama **um** workflow
 e recebe lint, testes, cobertura com piso, imagem com portão de vulnerabilidade,
-sete varreduras de segurança, Sonar com Quality Gate e o commit no GitOps — com
-tudo o que pode ser paralelo rodando em paralelo.
+sete varreduras de segurança, Sonar com Quality Gate, a versão semântica
+decidida pelos commits, e o commit no GitOps — com tudo o que pode ser paralelo
+rodando em paralelo.
 
 ```yaml
 jobs:
   esteira:
-    permissions: { contents: read, packages: write, security-events: write, actions: read }
+    permissions: { contents: write, packages: write, security-events: write, actions: read }
     uses: slipalison/github-workflows/.github/workflows/pipeline.yml@main
     with:
       componentes: '[{"nome":"app","linguagem":"python","cobertura":80}]'
@@ -28,10 +29,11 @@ repositório poliglota .NET + dois frontends, e repositório privado.
 ## O desenho
 
 ```
-        ┌─ qualidade  (N componentes, N jobs paralelos)
-        ├─ imagem     (build → varre → publica)
-push ───┼─ sonar      (análise + Quality Gate)          ─── portão ─── publicar
-        └─ seguranca  (7 varreduras paralelas)                         (só na main)
+        ┌─ versao     (próxima versão, pelos commits)
+        ├─ qualidade  (N componentes, N jobs paralelos)
+push ───┼─ imagem     (build → varre → publica)          ─── portão ─── publicar ─── lancar
+        ├─ sonar      (análise + Quality Gate)                          (GitOps)    (alias, tag, release)
+        └─ seguranca  (7 varreduras paralelas)                               só na main
 ```
 
 O relógio é o do job mais lento, não a soma.
@@ -152,6 +154,7 @@ esquecido não dá erro, só deixa de ter a proteção. Aqui isso é
 | Imagem varrida **antes** de publicar | [`build-push.yml`](.github/workflows/build-push.yml) | A versão anterior publicava e só depois varria: uma imagem com CRITICAL ficava no GHCR mesmo com o job vermelho. |
 | Segredo varrido no **histórico inteiro** | [`seguranca.yml`](.github/workflows/seguranca.yml) | Um segredo removido do HEAD continua em qualquer clone. Achado ali significa **rotacionar**, não apagar a linha. |
 | `concurrency` com `cancel-in-progress` | exemplos | Impede que um run obsoleto ainda escreva no GitOps. |
+| Tag e release só com `GITHUB_TOKEN`, no último job | [`lancar.yml`](.github/workflows/lancar.yml) | `contents: write` existe num job só, depois de todos os portões, e nunca em pull request. Nenhum PAT: tudo o que precisa da versão acontece no mesmo run. Assunto de commit é texto de terceiro — entra nas notas por arquivo, nunca por linha de comando. |
 
 O CI deste repositório roda `pinar_actions.py --verificar`, que **falha** se
 algum `uses:` escapar por tag ou divergir do lock.
@@ -236,6 +239,124 @@ Em **Git Bash ou MSYS**, prefira `--arquivo` ou a variável de ambiente: o
 
 ---
 
+## Versão automática
+
+Ninguém escreve número de versão em lugar nenhum. A esteira lê os commits desde
+a última tag `vX.Y.Z` alcançável e decide o salto pela mensagem, no padrão
+[Conventional Commits](https://www.conventionalcommits.org/pt-br/):
+
+| Commit | Salto | |
+|---|---|---|
+| `feat!:` ou rodapé `BREAKING CHANGE:` | major | 1.4.2 → 2.0.0 |
+| `feat:` | minor | 1.4.2 → 1.5.0 |
+| `fix:` `perf:` `refactor:` `docs:` `test:` `build:` `ci:` `chore:` `style:` `revert:` | patch | 1.4.2 → 1.4.3 |
+| qualquer outra coisa | **reprova o run** | |
+
+O maior salto vence. Sem tag nenhuma, a primeira versão é `versao_inicial`
+(`1.0.0`), seja qual for o conteúdo. Não há regra especial para `0.x`: uma
+quebra em `0.4.2` vira `1.0.0`.
+
+### O que é automático, e o único bit que não é
+
+A esteira calcula o número, cria a tag e a release com as notas dos commits,
+aponta `:<versão>` para o **mesmo digest** que `sha-<commit>` e leva a versão ao
+GitOps. O que ela **não** consegue é saber se uma mudança quebra contrato:
+nenhuma ferramenta descobre isso para qualquer linguagem. Esse bit vem da
+mensagem do commit, e de mais nenhum lugar.
+
+Por isso o padrão é estrito. Um commit sem tipo que virasse `patch` em silêncio
+seria uma quebra de contrato publicada como correção — e o próximo a descobrir
+seria quem atualizou "só o patch". Medido antes de decidir: dos 179 commits nos
+cinco repositórios deste homelab, 148 já seguiam o padrão; os 31 restantes eram
+frases soltas, todas recentes.
+
+### O que acontece num push na `main`
+
+1. `versao` corre em paralelo com todo o resto — só precisa do git — e produz
+   `1.4.0`, `v1.4.0`, o salto e as notas.
+2. `publicar` escreve no GitOps `image.tag: sha-…` **e** `versao: 1.4.0`.
+3. `lancar`, o último: alias `:1.4.0` para o digest da imagem, `git tag`,
+   release. Só depois de todos os portões e depois do GitOps.
+
+Três decisões dentro disso:
+
+**A identidade no cluster continua sendo o sha.** A versão vai para o chart
+(`APP_VERSION`, `service.version`, `app.kubernetes.io/version`), não para
+`image.tag`. Se fosse a tag deployada, dois commits com a mesma versão seriam
+invisíveis para o ArgoCD: mesma tag, nenhum diff, nenhum rollout.
+
+**A tag nasce por último, e o run é idempotente.** `lancar` recalcula a versão e
+compara com a que `versao` calculou no início; se entrou tag ou commit no meio,
+reprova sem criar nada. Um run cancelado pelo `cancel-in-progress` não deixa tag,
+e o próximo chega ao mesmo número sozinho.
+
+**Só `GITHUB_TOKEN`.** Tag criada com ele não dispara `on: push: tags` — e não
+precisa: tudo o que depende da versão acontece no mesmo run. A alternativa, um
+PAT para "acordar" outro workflow, é uma credencial de conta inteira guardada em
+secret. É o que o release-please pede, e o que este desenho evita.
+
+### Reprova o que entrou agora, lista o que já estava
+
+Com commit direto na `main`, o commit ruim já entrou quando o run reprova. Ele
+não sai sem reescrever histórico. Então a reprovação vale para os commits
+**deste push** (`github.event.before..sha`) ou deste pull request; os
+anteriores aparecem nas notas como "Sem tipo" e não contam para o salto. Sem
+isso, um único commit errado travaria a esteira até alguém fazer force-push na
+`main`.
+
+Em pull request nada é criado: o painel do run mostra o que a mudança vai virar
+("1.4.0, minor, 2 feat, 1 fix") e reprova se algum commit do PR estiver fora do
+padrão.
+
+### O hook, para não descobrir no CI
+
+A mesma regra, na máquina, antes de o commit existir:
+
+```bash
+git config core.hooksPath /caminho/para/github-workflows/hooks
+```
+
+[`hooks/commit-msg`](hooks/commit-msg) chama `bin/versao.py conferir`. Um
+segundo ali economiza um run inteiro e um commit que já entrou. `git commit
+--no-verify` pula uma vez, de propósito. `core.hooksPath` troca o diretório de
+hooks inteiro: se o repositório já usa outros (`.husky`, `pre-commit`), some o
+arquivo lá em vez de apontar para cá.
+
+### Inputs
+
+| Input | Padrão | |
+|---|---|---|
+| `versionar` | `true` | desliga tudo isto |
+| `commits_sem_tipo` | `reprovar` | `patch` (vira correção) ou `ignorar` (não conta) |
+| `versao_inicial` | `1.0.0` | primeira tag |
+| `tag_movel_major` | `false` | também move `v1`, `v2`… — para repositório de templates e actions |
+
+Quem chama precisa conceder `contents: write` (tag e release) e `packages: write`
+(alias da imagem).
+
+### Por que um script próprio
+
+| | Última release | O que decidiu |
+|---|---|---|
+| **release-please** | v5.0.0, 2026-04 | Modelo de biblioteca: abre um Release PR, alguém faz merge, aí nasce a tag. Aqui todo push na `main` já vai para o cluster — a versão ficaria atrás do deploy. E o Release PR aberto com `GITHUB_TOKEN` não recebe checks: com o `Portao` obrigatório, ele nunca merge sem PAT. |
+| **semantic-release** | 25.0.9, 2026-08 | Funciona sem npm, mas instala meia dúzia de plugins pelo npm a cada run — contra o lock de 22 actions por SHA. |
+| **git-cliff** | 2.14.1, 2026-09 | Binário único, mantido, bom. Medido no 2.13.1: commit sem tipo dá `v1.0.0 → v1.0.0` em silêncio, e `no_increment_regex` foi ignorado sem aviso (só existe a partir do 2.14.0; o PyPI ainda está no 2.13.1). É o plano B se a regra crescer. |
+| **github-tag-action** | v6.2, 2024-03 | Último push em 2024-08. Morta. |
+
+A regra cabe em [`bin/versao.py`](bin/versao.py), roda no terminal, e
+[`bin/versao_teste.py`](bin/versao_teste.py) a prova nas duas cores em vinte
+casos — inclusive `v1.10.0` acima de `v1.9.0` (ordenar como texto erra) e a tag
+móvel `v1` ignorada.
+
+### Helm é a exceção estrutural
+
+`Chart.yaml` exige `version`. No [`helm-charts`](https://github.com/slipalison/helm-charts)
+o campo é `0.0.0` e o CI carimba a versão calculada com `helm package
+--version` — o ArgoCD lê o pacote no GHCR, não o arquivo no git. Nenhum número
+escrito à mão, e nenhum commit de bot na `main`.
+
+---
+
 ## O que tem aqui
 
 | Arquivo | O que faz |
@@ -245,17 +366,23 @@ Em **Git Bash ou MSYS**, prefira `--arquivo` ou a variável de ambiente: o
 | [`seguranca.yml`](.github/workflows/seguranca.yml) | Gitleaks, TruffleHog, Semgrep, CodeQL, SCA (Trivy fs), IaC e SBOM, em paralelo. |
 | [`sonar.yml`](.github/workflows/sonar.yml) | SonarQube/Cloud com Quality Gate e o guard anti-pulo. |
 | [`build-push.yml`](.github/workflows/build-push.yml) | Imagem: constrói, varre, publica. Devolve `tag` e `digest`. |
-| [`deploy.yml`](.github/workflows/deploy.yml) | Escreve a tag no GitOps. Não toca no cluster — quem aplica é o ArgoCD. |
+| [`deploy.yml`](.github/workflows/deploy.yml) | Escreve a tag e a versão no GitOps. Não toca no cluster — quem aplica é o ArgoCD. |
+| [`versao.yml`](.github/workflows/versao.yml) | Próxima versão pelos commits. Reprova commit fora do Conventional Commits. |
+| [`lancar.yml`](.github/workflows/lancar.yml) | Alias `:<versão>` da imagem, tag, release. O último job, só na main. |
 | [`helm-lint.yml`](.github/workflows/helm-lint.yml) | Renderiza o chart com os valores reais e recusa `:latest`. |
-| [`ci.yml`](.github/workflows/ci.yml) | O CI **deste** repositório. |
+| [`ci.yml`](.github/workflows/ci.yml) | O CI **deste** repositório — que também se versiona. |
 
 Composite actions: [`preparar`](.github/actions/preparar/action.yml),
 [`relatar-sarif`](.github/actions/relatar-sarif/action.yml),
-[`relatar-cobertura`](.github/actions/relatar-cobertura/action.yml).
+[`relatar-cobertura`](.github/actions/relatar-cobertura/action.yml),
+[`versao`](.github/actions/versao/action.yml).
 
 Scripts: [`resumo_sarif.py`](bin/resumo_sarif.py),
 [`cobertura.py`](bin/cobertura.py), [`pinar_actions.py`](bin/pinar_actions.py),
-[`semear_secret.py`](bin/semear_secret.py).
+[`semear_secret.py`](bin/semear_secret.py), [`versao.py`](bin/versao.py).
+
+Hook: [`hooks/commit-msg`](hooks/commit-msg), a mesma regra de `versao.py` antes
+de o commit existir.
 
 ### Por que Python, e não Node ou Go
 
@@ -263,7 +390,7 @@ Já está no runner, roda sem passo de instalação, e o Actions aceita
 `shell: python` nativamente. Node também está, mas Go exigiria um passo de build
 antes do primeiro uso — custo fixo em todo job, para resolver o mesmo problema.
 
-Os três scripts rodam **fora do CI**, no terminal, com os arquivos na mão. Isso
+Os scripts rodam **fora do CI**, no terminal, com os arquivos na mão. Isso
 não é conveniência: é o que permite provar que um portão reprova quando deve,
 sem abrir um pull request só para ver a cor.
 
@@ -306,10 +433,11 @@ de CI para descobrir três problemas que dava para ver de uma vez.
 2. **Credencial de escrita no GitOps** — `GITOPS_SSH_KEY` (chave de deploy
    criada *no* repositório de GitOps, preferida: alcança aquele repositório e
    mais nada) ou `GITOPS_TOKEN` (fine-grained, `Contents: RW`).
-3. **`permissions` declarado no job que chama** — `packages: write` para a
-   imagem, `security-events: write` para o SARIF. Sem isso o run morre em
-   `startup_failure` com *"requesting 'packages: write', but is only allowed
-   'packages: read'"*, que **não aparece no log de passo nenhum**.
+3. **`permissions` declarado no job que chama** — `contents: write` para a tag e
+   a release, `packages: write` para a imagem e o alias, `security-events:
+   write` para o SARIF. Sem isso o run morre em `startup_failure` com
+   *"requesting 'packages: write', but is only allowed 'packages: read'"*, que
+   **não aparece no log de passo nenhum**.
 4. **`SONAR_TOKEN`** no repositório, para a análise.
 5. **Imagem acessível ao cluster.** Pacote privado no GHCR sem `imagePullSecret`
    deixa o pod em `ImagePullBackOff` dizendo que não encontrou a imagem — o que

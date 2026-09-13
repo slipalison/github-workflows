@@ -1,0 +1,25 @@
+#!/bin/sh
+# Hook commit-msg: recusa mensagem fora do Conventional Commits ANTES de o
+# commit existir. E a mesma regra que a esteira aplica em versao.yml — la ela
+# custa um run inteiro e um commit que ja entrou na main; aqui custa um segundo.
+#
+# A regra mora em bin/versao.py (subcomando `conferir`). Este arquivo so a chama.
+#
+# INSTALAR, uma vez por repositorio, apontando para ESTE clone:
+#
+#     git config core.hooksPath /caminho/para/github-workflows/hooks
+#
+# `core.hooksPath` troca o diretorio de hooks inteiro: se o repositorio ja usa
+# outros hooks (.husky, pre-commit), some este arquivo la em vez de apontar
+# para ca.
+#
+# Pular UMA vez, de proposito:  git commit --no-verify
+
+aqui=$(dirname "$0")
+for py in python3 python py; do
+  if command -v "$py" >/dev/null 2>&1 && "$py" -c "import sys" >/dev/null 2>&1; then
+    exec "$py" "$aqui/../bin/versao.py" conferir "$1"
+  fi
+done
+echo "commit-msg: nenhum python encontrado; a mensagem nao foi conferida. Instale python3 ou use --no-verify." >&2
+exit 1

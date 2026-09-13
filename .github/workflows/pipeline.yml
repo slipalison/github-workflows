@@ -17,9 +17,10 @@ name: Pipeline
 #
 # Agora:
 #
-#     qualidade  ─┐
-#     imagem     ─┤
-#     sonar      ─┼──>  publicar   (so na main, e so se TUDO passou)
+#     versao     ─┐
+#     qualidade  ─┤
+#     imagem     ─┼──>  publicar  ──>  lancar   (so na main, e so se TUDO passou)
+#     sonar      ─┤     (GitOps)       (alias da imagem, tag, release)
 #     seguranca  ─┘
 #
 # O relogio passa a ser o do job mais lento, e nao a soma.
@@ -37,10 +38,47 @@ name: Pipeline
 # `publicar` usa `needs` com TODOS eles justamente porque ali o `needs` significa
 # alguma coisa — diferente do `needs: backend-build` do `simulator-ccb`, que so
 # serializa dois builds identicos porque o primeiro nao deixa artefato.
+#
+# A VERSAO, SEM NINGUEM ESCREVER NUMERO
+# -------------------------------------
+# `versao` le os commits desde a ultima tag e decide o salto pelo Conventional
+# Commits (feat -> minor, `!` -> major, o resto -> patch). Corre em paralelo
+# com o resto: so precisa do git. `publicar` leva o numero ao GitOps, e `lancar`
+# — o ultimo — aponta `:<versao>` para o MESMO digest que `sha-<commit>`, cria a
+# tag e a release. A identidade que o cluster usa continua sendo o sha; a versao
+# e o nome legivel do mesmo bit.
+#
+# Commit fora do padrao REPROVA `versao`, e com ele o portao e a publicacao. E o
+# padrao, de proposito: um commit sem tipo virando patch em silencio seria uma
+# quebra de contrato publicada como correcao. `commits_sem_tipo` afrouxa.
 
 on:
   workflow_call:
     inputs:
+      # -------------------------------------------------------------- versao --
+      versionar:
+        description: "Calcula a versao pelos commits, cria tag e release na main"
+        required: false
+        type: boolean
+        default: true
+      commits_sem_tipo:
+        description: >-
+          reprovar (padrao) | patch | ignorar. O que fazer com commit fora do
+          Conventional Commits.
+        required: false
+        type: string
+        default: "reprovar"
+      versao_inicial:
+        description: "Primeira versao, quando o repositorio nao tem tag vX.Y.Z"
+        required: false
+        type: string
+        default: "1.0.0"
+      tag_movel_major:
+        description: "Tambem move a tag vN (v1, v2). Para repositorio de templates e actions."
+        required: false
+        type: boolean
+        default: false
+
       # ----------------------------------------------------------- qualidade --
       componentes:
         description: >-
@@ -155,6 +193,15 @@ permissions:
   contents: read
 
 jobs:
+  versao:
+    if: inputs.versionar
+    permissions:
+      contents: read
+    uses: slipalison/github-workflows/.github/workflows/versao.yml@main
+    with:
+      commits_sem_tipo: ${{ inputs.commits_sem_tipo }}
+      versao_inicial: ${{ inputs.versao_inicial }}
+
   qualidade:
     uses: slipalison/github-workflows/.github/workflows/qualidade.yml@main
     with:
@@ -207,16 +254,17 @@ jobs:
   publicar:
     # Aqui o `needs` vale: e o unico ponto em que uma etapa realmente depende do
     # resultado das outras.
-    needs: [qualidade, imagem, sonar, seguranca]
+    needs: [versao, qualidade, imagem, sonar, seguranca]
     # `always()` combinado com os testes explicitos e proposital. Sem ele, um job
     # PULADO (sonar desligado, imagem vazia) conta como nao-sucesso e o deploy
     # nunca acontece; com `always()` sozinho, um job FALHO nao impediria nada.
-    # Entao: roda sempre, e exige que nenhum dos quatro tenha falhado ou sido
+    # Entao: roda sempre, e exige que nenhum dos cinco tenha falhado ou sido
     # cancelado — pulado esta liberado, falho nao.
     if: >-
       always()
       && inputs.app != ''
       && github.ref == format('refs/heads/{0}', inputs.branch_de_producao)
+      && (needs.versao.result == 'success' || needs.versao.result == 'skipped')
       && needs.qualidade.result == 'success'
       && needs.seguranca.result == 'success'
       && needs.imagem.result == 'success'
@@ -227,17 +275,50 @@ jobs:
     with:
       app: ${{ inputs.app }}
       tag: ${{ needs.imagem.outputs.tag }}
+      versao: ${{ needs.versao.outputs.versao }}
       gitops_repo: ${{ inputs.gitops_repo }}
     secrets:
       GITOPS_SSH_KEY: ${{ secrets.GITOPS_SSH_KEY }}
       GITOPS_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+
+  lancar:
+    # O ultimo. Depois de todos os portoes E depois do GitOps: a tag e a prova de
+    # que o commit passou por tudo e chegou ao cluster. `salto == nenhum` (HEAD
+    # ja tageado, run repetido) nao cria nada.
+    needs: [versao, qualidade, imagem, sonar, seguranca, publicar]
+    if: >-
+      always()
+      && inputs.versionar
+      && github.event_name != 'pull_request'
+      && github.ref == format('refs/heads/{0}', inputs.branch_de_producao)
+      && needs.versao.result == 'success'
+      && needs.versao.outputs.salto != 'nenhum'
+      && needs.qualidade.result == 'success'
+      && needs.seguranca.result == 'success'
+      && (needs.imagem.result == 'success' || needs.imagem.result == 'skipped')
+      && (needs.sonar.result == 'success' || needs.sonar.result == 'skipped')
+      && (needs.publicar.result == 'success' || needs.publicar.result == 'skipped')
+    # `contents: write` para a tag e a release; `packages: write` para o alias da
+    # imagem. Quem chama precisa conceder os dois — mesma regra do `imagem`.
+    permissions:
+      contents: write
+      packages: write
+    uses: slipalison/github-workflows/.github/workflows/lancar.yml@main
+    with:
+      versao: ${{ needs.versao.outputs.versao }}
+      tag: ${{ needs.versao.outputs.tag }}
+      imagem: ${{ needs.imagem.result == 'success' && inputs.imagem || '' }}
+      digest: ${{ needs.imagem.outputs.digest }}
+      tag_movel_major: ${{ inputs.tag_movel_major }}
+      commits_sem_tipo: ${{ inputs.commits_sem_tipo }}
+      versao_inicial: ${{ inputs.versao_inicial }}
 
   # Um unico check para marcar como obrigatorio na protecao de branch. Sem isto
   # a lista de checks obrigatorios precisa nomear cada job, e um job novo entra
   # sem ser exigido — protecao que se afrouxa sozinha a cada mudanca.
   portao:
     name: Portao
-    needs: [qualidade, imagem, sonar, seguranca]
+    needs: [versao, qualidade, imagem, sonar, seguranca]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -245,6 +326,7 @@ jobs:
       - name: Conferir os resultados
         env:
           RESULTADOS: |
+            versao=${{ needs.versao.result }}
             qualidade=${{ needs.qualidade.result }}
             imagem=${{ needs.imagem.result }}
             sonar=${{ needs.sonar.result }}

@@ -5,6 +5,12 @@ name: CI deste repositorio
 # action que nao existia (`@0.28.0` em vez de `@v0.28.0`), `secrets` usado num
 # `if:` de passo — nao aparecem em log de passo nenhum: o run morre em
 # `startup_failure`, sem saida, e o unico sinal e a tela do run.
+#
+# ESTE REPOSITORIO TAMBEM SE VERSIONA, com os proprios workflows. Cada push na
+# main que passa por tudo vira uma tag vX.Y.Z, uma release com as notas dos
+# commits e a tag movel vN — para quem preferir `@v1` a `@main`. Um `feat!:`
+# aqui (input renomeado, comportamento trocado) vira major, em vez de quebrar
+# quem chama `@main` sem aviso.
 
 on:
   push:
@@ -20,6 +26,15 @@ permissions:
   contents: read
 
 jobs:
+  # Por caminho local (`./`), e nao `@main`: e a versao DESTE commit que roda.
+  # Dentro dele as composite actions continuam em `@main` — e a regra `_proprio`
+  # do lock — entao no push na main tudo bate, e num pull request a action
+  # `versao` seria a de main. Aceito: pull request aqui testa pelos jobs abaixo.
+  versao:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/versao.yml
+
   scripts:
     name: Scripts
     runs-on: ubuntu-latest
@@ -43,6 +58,13 @@ jobs:
           pip install ruff
           ruff check bin/
           ruff format --check bin/
+
+      - name: versao.py, nas duas cores
+        # Vinte casos em repositorios git descartaveis: feat, fix, `!`, rodape
+        # BREAKING CHANGE, v1.10.0 acima de v1.9.0, a tag movel v1 ignorada — e
+        # os que REPROVAM: commit sem tipo, tipo com erro de digitacao, versao
+        # esperada diferente da calculada.
+        run: python3 bin/versao_teste.py
 
       - name: Provar os portoes nas DUAS cores
         # O teste que importa nao e "o script roda": e "o script REPROVA quando
@@ -174,3 +196,19 @@ jobs:
           done < <(grep -rhoE 'slipalison/github-workflows/[^@]+@[a-zA-Z0-9._-]+' exemplos/ .github/workflows/ | sort -u)
           if [ "$faltou" = "1" ]; then exit 1; fi
           echo "Todas as referencias internas resolvem."
+
+  lancar:
+    # So depois de tudo verde, so na main, e so se ha o que lancar: HEAD ja
+    # tageado (run repetido) da `salto=nenhum` e este job nem entra.
+    needs: [versao, scripts, pins, sintaxe]
+    if: >-
+      github.event_name != 'pull_request'
+      && github.ref == 'refs/heads/main'
+      && needs.versao.outputs.salto != 'nenhum'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/lancar.yml
+    with:
+      versao: ${{ needs.versao.outputs.versao }}
+      tag: ${{ needs.versao.outputs.tag }}
+      tag_movel_major: true

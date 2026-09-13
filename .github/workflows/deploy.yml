@@ -14,6 +14,15 @@ name: Deploy por commit no GitOps
 #                    funcionando, mas vive preso a uma conta de usuario: se ela
 #                    sair ou o token expirar, todo app que o usa para de
 #                    publicar ao mesmo tempo.
+#
+# TAG E VERSAO SAO DUAS COISAS
+# ----------------------------
+# `image.tag` continua sendo `sha-<commit>`: imutavel, unica por commit, e o que
+# o ArgoCD compara. `versao` (1.4.0) e o nome legivel do mesmo bit — vai para o
+# chart, que a poe em APP_VERSION, em service.version e no rotulo
+# app.kubernetes.io/version. Se a versao fosse a tag deployada, dois commits com
+# a mesma versao (um `docs:` sem salto, por exemplo) seriam invisiveis para o
+# ArgoCD: mesma tag, nenhum diff, nenhum rollout.
 on:
   workflow_call:
     inputs:
@@ -25,6 +34,11 @@ on:
         description: "Tag da imagem a publicar"
         required: true
         type: string
+      versao:
+        description: "Versao semantica calculada pela esteira (1.4.0). Vazio nao escreve."
+        required: false
+        type: string
+        default: ""
       gitops_repo:
         required: false
         type: string
@@ -115,35 +129,57 @@ jobs:
           token: ${{ secrets.GITOPS_TOKEN }}
           path: gitops
 
-      - name: Escrever a tag
+      - name: Escrever a tag e a versao
         id: escrita
         working-directory: gitops
+        # Os valores entram por `env` e chegam ao yq por `strenv`: nada e
+        # interpolado dentro do script nem dentro da expressao do yq.
+        env:
+          APP: ${{ inputs.app }}
+          TAG: ${{ inputs.tag }}
+          VERSAO: ${{ inputs.versao }}
         run: |
           set -euo pipefail
-          arquivo="apps/${{ inputs.app }}/values.yaml"
+          [[ "$APP" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "::error::nome de app invalido: $APP"; exit 1; }
+          [[ "$TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || { echo "::error::tag invalida: $TAG"; exit 1; }
+          if [ -n "$VERSAO" ]; then
+            [[ "$VERSAO" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::versao invalida: $VERSAO"; exit 1; }
+          fi
+          arquivo="apps/$APP/values.yaml"
           if [ ! -f "$arquivo" ]; then
             echo "::error::$arquivo nao existe no GitOps. Crie o app la primeiro."
             exit 1
           fi
           # yq em vez de sed: values.yaml e YAML, e sed em YAML funciona ate o
           # dia em que a indentacao muda.
-          yq -i '.image.tag = "${{ inputs.tag }}"' "$arquivo"
+          yq -i '.image.tag = strenv(TAG)' "$arquivo"
+          if [ -n "$VERSAO" ]; then
+            yq -i '.versao = strenv(VERSAO)' "$arquivo"
+          fi
           if git diff --quiet; then
-            echo "Tag ja era ${{ inputs.tag }}; nada a fazer."
+            echo "Tag ja era $TAG; nada a fazer."
             echo "mudou=nao" >> "$GITHUB_OUTPUT"
           else
             echo "mudou=sim" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -n "$VERSAO" ]; then
+            echo "mensagem=deploy($APP): $VERSAO ($TAG)" >> "$GITHUB_OUTPUT"
+          else
+            echo "mensagem=deploy($APP): $TAG" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Commitar
         if: steps.escrita.outputs.mudou == 'sim' && inputs.via_pr == false
         working-directory: gitops
+        env:
+          APP: ${{ inputs.app }}
+          MENSAGEM: ${{ steps.escrita.outputs.mensagem }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "apps/${{ inputs.app }}/values.yaml"
-          git commit -m "deploy(${{ inputs.app }}): ${{ inputs.tag }}"
+          git add "apps/$APP/values.yaml"
+          git commit -m "$MENSAGEM"
           git push
 
       - name: Abrir pull request
@@ -151,17 +187,20 @@ jobs:
         working-directory: gitops
         env:
           GH_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+          APP: ${{ inputs.app }}
+          TAG: ${{ inputs.tag }}
+          MENSAGEM: ${{ steps.escrita.outputs.mensagem }}
         run: |
           set -euo pipefail
           if [ -z "${GH_TOKEN:-}" ]; then
             echo "::error::via_pr exige GITOPS_TOKEN — a API de pull request nao aceita chave de deploy."
             exit 1
           fi
-          ramo="deploy/${{ inputs.app }}-${{ inputs.tag }}"
+          ramo="deploy/$APP-$TAG"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b "$ramo"
-          git add "apps/${{ inputs.app }}/values.yaml"
-          git commit -m "deploy(${{ inputs.app }}): ${{ inputs.tag }}"
+          git add "apps/$APP/values.yaml"
+          git commit -m "$MENSAGEM"
           git push -u origin "$ramo"
           gh pr create --fill --base main --head "$ramo"

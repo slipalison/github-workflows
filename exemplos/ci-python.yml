@@ -1,9 +1,13 @@
 # Copiar para .github/workflows/ci.yml no repositorio da aplicacao.
 #
 # E ISTO. A esteira inteira — lint, testes, cobertura, imagem com portao de
-# vulnerabilidade, seis varreduras de seguranca, Sonar com Quality Gate e o
-# commit no GitOps — cabe aqui porque a orquestracao mora em
-# slipalison/github-workflows e nao em copia.
+# vulnerabilidade, sete varreduras de seguranca, Sonar com Quality Gate, a
+# versao semantica decidida pelos commits e o commit no GitOps — cabe aqui
+# porque a orquestracao mora em slipalison/github-workflows e nao em copia.
+#
+# A versao vem das mensagens de commit, no padrao Conventional Commits (feat ->
+# minor, feat! -> major, o resto -> patch). Commit fora do padrao REPROVA a
+# esteira; e o padrao, e `commits_sem_tipo: patch` afrouxa.
 name: CI
 
 on:
@@ -25,8 +29,11 @@ jobs:
     # Sem `packages: write` o run morre em startup_failure com
     # "requesting 'packages: write', but is only allowed 'packages: read'" — que
     # nao aparece no log de passo nenhum, so na tela do run.
+    #
+    # `contents: write` e para a tag e a release: existe num job so (lancar), o
+    # ultimo, e nunca em pull request.
     permissions:
-      contents: read
+      contents: write
       packages: write
       security-events: write
       actions: read

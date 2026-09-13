@@ -1,0 +1,71 @@
+name: Versao pelos commits
+description: >-
+  Le os commits desde a ultima tag vX.Y.Z, aplica o Conventional Commits e
+  devolve a proxima versao. Por padrao, commit fora do padrao REPROVA.
+
+# Exige um checkout com historico completo e tags (`historico-completo: "true"`
+# na action preparar). Com clone raso nao ha tag para achar, e a resposta seria
+# "primeira versao" para sempre.
+#
+# A regra mora em bin/versao.py; esta action so a chama com os argumentos do
+# workflow. E o mesmo script que hooks/commit-msg roda na maquina de quem
+# commita.
+
+inputs:
+  commits-sem-tipo:
+    description: "reprovar | patch | ignorar: o que fazer com commit fora do padrao"
+    required: false
+    default: "reprovar"
+  versao-inicial:
+    description: "Primeira versao, quando nao ha tag nenhuma"
+    required: false
+    default: "1.0.0"
+  novos:
+    description: "Faixa antes..depois dos commits deste push ou PR; vazio = todos desde a tag"
+    required: false
+    default: ""
+  notas:
+    description: "Onde escrever as notas da versao, em Markdown"
+    required: false
+    default: "notas-versao.md"
+  esperada:
+    description: "Se dado, reprova quando a versao calculada for outra"
+    required: false
+    default: ""
+
+outputs:
+  versao:
+    description: "Proxima versao, sem prefixo (1.4.0)"
+    value: ${{ steps.calc.outputs.versao }}
+  tag:
+    description: "A mesma, como tag (v1.4.0)"
+    value: ${{ steps.calc.outputs.tag }}
+  anterior:
+    description: "Tag anterior, ou vazio"
+    value: ${{ steps.calc.outputs.anterior }}
+  salto:
+    description: "major | minor | patch | inicial | nenhum"
+    value: ${{ steps.calc.outputs.salto }}
+  notas:
+    description: "Caminho do arquivo de notas"
+    value: ${{ inputs.notas }}
+
+runs:
+  using: composite
+  steps:
+    - name: Calcular
+      id: calc
+      shell: bash
+      env:
+        FERRAMENTAS: ${{ github.action_path }}/../../../bin
+        SEM_TIPO: ${{ inputs.commits-sem-tipo }}
+        INICIAL: ${{ inputs.versao-inicial }}
+        NOVOS: ${{ inputs.novos }}
+        NOTAS: ${{ inputs.notas }}
+        ESPERADA: ${{ inputs.esperada }}
+      run: |
+        set -euo pipefail
+        args=(calcular --sem-tipo "$SEM_TIPO" --inicial "$INICIAL" --notas "$NOTAS")
+        if [ -n "$NOVOS" ]; then args+=(--novos "$NOVOS"); fi
+        if [ -n "$ESPERADA" ]; then args+=(--esperada "$ESPERADA"); fi
+        python3 "$FERRAMENTAS/versao.py" "${args[@]}"
