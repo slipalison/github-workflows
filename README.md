@@ -308,6 +308,20 @@ Em pull request nada é criado: o painel do run mostra o que a mudança vai vira
 ("1.4.0, minor, 2 feat, 1 fix") e reprova se algum commit do PR estiver fora do
 padrão.
 
+**Correção nos templates só chega por run novo, não por `gh run rerun`.**
+Medido no primeiro dia: o rerun re-resolve as composite actions `@main` (a
+trava nova do `preparar` apareceu na tentativa 2), mas mantém o workflow
+reutilizável da resolução original — a tentativa 3 falhou no ponto que já
+estava corrigido aqui. Um commit vazio no repositório da aplicação resolve.
+
+**Dois bugs que o primeiro dia mediu, e que ficaram como trava.** O
+`historico-completo` do `preparar` nunca funcionou (`&& 0 || 1`, e `0` é falso
+na expressão do Actions): o Sonar media "New Code" em clone raso e a varredura
+de segredo "no histórico inteiro" via um commit só — os dois verdes. Agora o
+`preparar` reprova se pediu histórico e o clone veio raso. E o recálculo dentro
+de `lancar` reprovava commits antigos que o `versao` já tinha julgado; hoje ele
+recebe a faixa vazia, porque ali nada é novo.
+
 ### O hook, para não descobrir no CI
 
 A mesma regra, na máquina, antes de o commit existir:
