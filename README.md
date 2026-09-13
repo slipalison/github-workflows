@@ -46,6 +46,7 @@ cluster.
 | `build-push.yml` | Imagem com cache, tag `sha-<7>`, push no GHCR e varredura Trivy. Devolve a tag. |
 | `deploy.yml` | Escreve a tag em `apps/<app>/values.yaml` do repositório de GitOps e commita. Não toca no cluster. |
 | `dotnet.yml` | Restore, build e testes com cobertura. |
+| `python.yml` | Lint com ruff (`check` e `format`) e testes com pytest, com cobertura mínima opcional. |
 | `helm-lint.yml` | Renderiza o chart com os valores reais e recusa `:latest`. |
 | `exemplo-ci.yml` | Modelo para copiar no repositório de um app. |
 
