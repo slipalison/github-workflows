@@ -188,6 +188,37 @@ O que **não** se faz é deixar um repositório privado sem análise e fingir qu
 portão existe. Para isso há `sonar_exigir_token: false`, que é explícito, aparece
 no diff, e emite `::warning::` em todo run.
 
+### O secret em vários repositórios de uma vez
+
+Não existe secret de Actions global para conta pessoal — o `gh` é explícito:
+secret de `user` serve ao Codespaces, não ao Actions. E secret de **organização,
+no plano Free, não alcança repositório privado**: a organização não elimina o
+problema, divide em dois.
+
+[`bin/semear_secret.py`](bin/semear_secret.py) resolve os dois com um comando:
+
+```bash
+python bin/semear_secret.py --listar            # quem receberia, sem gravar
+SONAR_TOKEN=... python bin/semear_secret.py --aplicar
+python bin/semear_secret.py --aplicar --secret GITOPS_SSH_KEY
+```
+
+Duas decisões dentro dele, e as duas vieram de erro medido na primeira execução:
+
+**A lista não é mantida à mão.** Ele lê os workflows de cada repositório e
+descobre quem consome aquele secret. Uma lista escrita à mão envelhece calada —
+alguém adota a esteira, esquece de acrescentar, e na próxima rotação aquele
+repositório fica com o token velho.
+
+**O critério é o caminho qualificado, não o nome do arquivo.** Procurar
+`pipeline.yml` trouxe o `TranslateReader`, que tem um `pipeline.yml` próprio sem
+relação nenhuma com isto; procurar `sonar.yml` trouxe o `homelab-gitops`, que só
+usa o `helm-lint.yml`. Gravar um segredo onde ele não serve não quebra nada hoje
+— cria mais um segredo para vazar e para lembrar de rotacionar.
+
+O valor vai por **stdin**, nunca por argumento: `gh secret set --body "$TOKEN"`
+põe o segredo no `argv`, e `argv` é legível por qualquer processo da máquina.
+
 ---
 
 ## O que tem aqui
@@ -208,7 +239,8 @@ Composite actions: [`preparar`](.github/actions/preparar/action.yml),
 [`relatar-cobertura`](.github/actions/relatar-cobertura/action.yml).
 
 Scripts: [`resumo_sarif.py`](bin/resumo_sarif.py),
-[`cobertura.py`](bin/cobertura.py), [`pinar_actions.py`](bin/pinar_actions.py).
+[`cobertura.py`](bin/cobertura.py), [`pinar_actions.py`](bin/pinar_actions.py),
+[`semear_secret.py`](bin/semear_secret.py).
 
 ### Por que Python, e não Node ou Go
 
