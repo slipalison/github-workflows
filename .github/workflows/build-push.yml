@@ -28,6 +28,11 @@ on:
         required: false
         type: string
         default: ""
+      severidade_bloqueante:
+        description: "Severidades que derrubam o build"
+        required: false
+        type: string
+        default: "CRITICAL"
     outputs:
       tag:
         description: "Tag publicada (sha-<7>)"
@@ -71,20 +76,28 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: false
 
-      - name: Varredura de vulnerabilidades
+      # DOIS passos, e nao um com severidade dupla. O trivy-action da
+      # precedencia a `severity` (entrada) sobre TRIVY_SEVERITY (ambiente),
+      # entao a versao anterior dizia no comentario que so CRITICAL derrubava e
+      # derrubava HIGH tambem. Separado, cada passo tem um proposito so.
+      - name: Relatorio de vulnerabilidades (nao derruba)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ inputs.image }}:${{ steps.meta.outputs.tag }}
           format: table
-          severity: CRITICAL,HIGH
-          # So CRITICAL derruba o build. HIGH aparece no log e vira trabalho
-          # planejado; derrubar tudo ensina o time a ignorar o relatorio.
+          severity: CRITICAL,HIGH,MEDIUM
+          exit-code: '0'
+          ignore-unfixed: true
+          vuln-type: os,library
+          trivyignores: ${{ inputs.trivyignores }}
+
+      - name: Portao de seguranca (CRITICAL derruba)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ inputs.image }}:${{ steps.meta.outputs.tag }}
+          format: table
+          severity: ${{ inputs.severidade_bloqueante }}
           exit-code: '1'
           ignore-unfixed: true
           vuln-type: os,library
-          # Vazio por padrao. Apontar para um arquivo que nao existe nao e
-          # ignorado pelo Trivy: ele sai com "cannot find ignorefile" e derruba
-          # o job — um repositorio sem excecoes nao conseguia usar este workflow.
           trivyignores: ${{ inputs.trivyignores }}
-        env:
-          TRIVY_SEVERITY: CRITICAL
