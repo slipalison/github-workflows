@@ -54,8 +54,12 @@ jobs:
           linguagem: python
 
       - name: ruff
+        # Versao fixada e so wheel: `pip install ruff` solto instala o que o
+        # PyPI tiver hoje, e um sdist executa setup.py na instalacao. E a mesma
+        # versao que o qualidade.yml instala para os repositorios de aplicacao,
+        # para o `ruff format` daqui e o de la discordarem o minimo possivel.
         run: |
-          pip install ruff
+          pip install --only-binary ':all:' ruff==0.16.7
           ruff check bin/
           ruff format --check bin/
 
@@ -173,7 +177,10 @@ jobs:
         run: |
           set -euo pipefail
           versao=1.7.12
-          curl -sSfL "https://github.com/rhysd/actionlint/releases/download/v${versao}/actionlint_${versao}_linux_amd64.tar.gz" \
+          # --proto '=https': sem isto um redirecionamento pode cair em http e
+          # o binario chega por texto puro. --tlsv1.2 fecha o resto.
+          curl -sSfL --proto '=https' --tlsv1.2 \
+            "https://github.com/rhysd/actionlint/releases/download/v${versao}/actionlint_${versao}_linux_amd64.tar.gz" \
             | tar -xz actionlint
           ./actionlint -color .github/workflows/*.yml exemplos/*.yml
 

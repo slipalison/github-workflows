@@ -46,6 +46,7 @@ import getpass
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.error
@@ -53,6 +54,13 @@ import urllib.request
 from pathlib import Path
 
 PROPRIO = "github-workflows"
+
+# Tudo o que vira argumento do `gh` passa por aqui antes. Nao ha shell no meio,
+# mas um valor comecando com `-` viraria flag do `gh` — e o nome do repositorio
+# vem da API, nao de quem digita. Reprovar cedo custa uma linha.
+NOME_DE_SECRET = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+NOME_DE_CONTA = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
+NOME_DE_REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 
 # O criterio nao pode ser "usa a esteira": e largo demais, e foi medido. Na
 # primeira execucao ele trouxe `homelab-gitops`, que so chama o helm-lint.yml, e
@@ -86,7 +94,11 @@ def repositorios(dono: str) -> list[dict]:
     dados = gh("repo", "list", dono, "--limit", "200", "--json", "name,visibility,isArchived")
     # Repositorio arquivado e somente leitura: gravar secret nele falha, e a
     # falha nao significa nada — so polui a saida.
-    return [r for r in json.loads(dados) if not r["isArchived"]]
+    lista = [r for r in json.loads(dados) if not r["isArchived"]]
+    for r in lista:
+        if not NOME_DE_REPO.match(r["name"]):
+            raise SystemExit(f"nome de repositorio inesperado vindo da API: {r['name']!r}")
+    return lista
 
 
 def consome(dono: str, repo: str, padroes: tuple[str, ...]) -> str | None:
@@ -186,6 +198,11 @@ def main() -> int:
         ),
     )
     args = ap.parse_args()
+
+    if not NOME_DE_SECRET.match(args.secret):
+        raise SystemExit(f"--secret precisa ser MAIUSCULAS_E_SUBLINHADO; recebi {args.secret!r}")
+    if not NOME_DE_CONTA.match(args.dono):
+        raise SystemExit(f"--dono nao parece uma conta do GitHub: {args.dono!r}")
 
     padroes = tuple(args.padrao) if args.padrao else PADROES.get(args.secret)
     if not padroes:

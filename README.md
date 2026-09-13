@@ -433,6 +433,7 @@ componentes: |
 | `caminho` | diretório de trabalho, padrão `.` |
 | `projeto` | dotnet: `.sln`/`.csproj` · node: workspace · go: `./...` |
 | `cobertura` | piso em %; `0` (padrão) desliga |
+| `scripts_de_instalacao` | node: `true` deixa o `npm ci` rodar `postinstall` e afins. O padrão é `--ignore-scripts`: script de instalação roda antes de qualquer teste, e é o vetor clássico de pacote comprometido. Ligue só para pacote nativo que precise compilar. |
 
 `fail-fast: false` de propósito: o padrão mata os outros componentes quando um
 falha e mostra só o primeiro erro — com três componentes, isso vira três rodadas

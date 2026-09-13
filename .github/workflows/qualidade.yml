@@ -21,6 +21,12 @@ name: Qualidade
 #   caminho      diretorio de trabalho, padrao "."
 #   projeto      dotnet: .sln/.slnx/.csproj | node: workspace | go: ./...
 #   cobertura    piso em %; 0 (padrao) desliga o portao daquele componente
+#   scripts_de_instalacao
+#                node: true deixa o `npm ci` rodar os scripts de instalacao
+#                das dependencias (postinstall e afins). O padrao e
+#                --ignore-scripts: um pacote comprometido executa na instalacao,
+#                antes de qualquer teste. Ligue so se algum pacote nativo
+#                precisar compilar — e saiba qual.
 
 on:
   workflow_call:
@@ -86,16 +92,21 @@ jobs:
       # ---------------------------------------------------------------- python
       - name: Instalar dependencias
         if: matrix.c.linguagem == 'python'
+        # As dependencias DO PROJETO entram como ele as declara: fixar versao ou
+        # exigir wheel e decisao do requirements.txt dele, e `pip install -e .`
+        # e o proprio projeto, que nao tem wheel por definicao. O Sonar aponta
+        # essas linhas (S8544, S8541); a resposta esta no repositorio da
+        # aplicacao, nao aqui. As FERRAMENTAS desta esteira, sim: versao fixa e
+        # so wheel — sdist executa setup.py na instalacao.
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip
           if [ -f pyproject.toml ]; then
             pip install -e ".[dev]" 2>/dev/null || pip install -e . 2>/dev/null || true
           fi
           for arquivo in requirements.txt requirements-dev.txt; do
             if [ -f "$arquivo" ]; then pip install -r "$arquivo"; fi
           done
-          pip install ruff pytest pytest-cov
+          pip install --only-binary ':all:' ruff==0.16.7 pytest==9.1.1 pytest-cov==7.1.0
 
       - name: ruff check
         if: matrix.c.linguagem == 'python'
@@ -115,9 +126,22 @@ jobs:
       # ------------------------------------------------------------------ node
       - name: npm ci
         if: matrix.c.linguagem == 'node'
+        # --ignore-scripts por padrao. Script de instalacao roda na maquina do
+        # CI antes de qualquer teste, com o que o job enxerga; e o vetor
+        # classico de pacote npm comprometido. O que a aplicacao importa nos
+        # testes continua rodando — isto tira o que roda SEM ninguem chamar.
+        # `scripts_de_instalacao: true` no componente devolve o comportamento
+        # antigo, para pacote nativo que precise compilar.
         env:
           HUSKY: "0"
-        run: npm ci
+          SCRIPTS: ${{ matrix.c.scripts_de_instalacao == true && 'sim' || 'nao' }}
+        run: |
+          set -euo pipefail
+          if [ "$SCRIPTS" = "sim" ]; then
+            npm ci
+          else
+            npm ci --ignore-scripts
+          fi
 
       - name: npm run build
         if: matrix.c.linguagem == 'node'

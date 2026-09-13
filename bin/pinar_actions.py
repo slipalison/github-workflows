@@ -63,10 +63,24 @@ USES = re.compile(
     re.MULTILINE,
 )
 SHA = re.compile(r"^[0-9a-f]{40}$")
+# `dono/repo`, e nada mais: e o que vira caminho de API e argumento do `gh`.
+# Uma chave do lock ou um `uses:` com `..`, `?` ou espaco nao e uma action —
+# e um caminho para outro lugar. Reprovar aqui e mais barato que descobrir la.
+ACAO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+CAMINHO_DE_API = re.compile(r"^repos/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/[A-Za-z0-9._/=?-]+$")
+
+
+def conferir_acao(acao: str) -> str:
+    if not ACAO.match(acao) or ".." in acao:
+        raise SystemExit(f"isto nao e um `dono/repo` de action: {acao!r}")
+    return acao
 
 
 def carregar() -> dict:
-    return json.loads(LOCK.read_text(encoding="utf-8"))
+    dados = json.loads(LOCK.read_text(encoding="utf-8"))
+    for nome in dados.get("actions", {}):
+        conferir_acao(nome)
+    return dados
 
 
 def salvar(dados: dict) -> None:
@@ -85,6 +99,8 @@ def api(caminho: str) -> dict:
     O `gh` ja carrega a credencial da maquina; o caminho HTTP existe para rodar
     dentro do CI, onde `gh` existe mas o token vem por ambiente.
     """
+    if not CAMINHO_DE_API.match(caminho) or ".." in caminho:
+        raise SystemExit(f"caminho de API fora do esperado: {caminho!r}")
     if os.environ.get("GITHUB_TOKEN"):
         req = urllib.request.Request(
             f"https://api.github.com/{caminho}",
@@ -109,7 +125,7 @@ def versao_mais_nova(acao: str) -> str:
     release latest ali resulta num SHA que existe e nao e o que se quer — e o
     erro so aparece quando a action deixa de funcionar.
     """
-    tags = [t["name"] for t in api(f"repos/{acao}/tags?per_page=100")]
+    tags = [t["name"] for t in api(f"repos/{conferir_acao(acao)}/tags?per_page=100")]
     semver = [t for t in tags if re.fullmatch(r"v\d+\.\d+\.\d+", t)]
     if not semver:
         raise SystemExit(f"{acao}: nenhuma tag vN.N.N encontrada")
@@ -117,7 +133,9 @@ def versao_mais_nova(acao: str) -> str:
 
 
 def sha_da_tag(acao: str, tag: str) -> str:
-    return api(f"repos/{acao}/commits/{tag}")["sha"]
+    if not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
+        raise SystemExit(f"{acao}: tag fora do formato vN.N.N: {tag!r}")
+    return api(f"repos/{conferir_acao(acao)}/commits/{tag}")["sha"]
 
 
 def percorrer(texto: str, acoes: dict, problemas: list[str], arquivo: Path, proprio: str) -> str:

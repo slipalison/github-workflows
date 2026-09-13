@@ -122,7 +122,10 @@ jobs:
         run: |
           set -euo pipefail
           versao=8.30.1
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${versao}/gitleaks_${versao}_linux_x64.tar.gz" \
+          # --proto '=https': sem isto um redirecionamento pode cair em http e
+          # o binario chega por texto puro. --tlsv1.2 fecha o resto.
+          curl -sSfL --proto '=https' --tlsv1.2 \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${versao}/gitleaks_${versao}_linux_x64.tar.gz" \
             | tar -xz gitleaks
           # `|| true`: o gitleaks sai 1 quando acha algo, e quem decide se isso
           # derruba o job e o portao do relatar-sarif, num lugar so.
