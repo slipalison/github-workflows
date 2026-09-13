@@ -56,7 +56,21 @@ cluster.
 |---|---|
 | **Entradas** | `image` (obrigatória, ex.: `ghcr.io/usuario/meu-app`), `context` (`.`), `dockerfile` (`Dockerfile`), `platforms` (`linux/amd64`) |
 | **Saída** | `tag` — `sha-<7>`, o que o `deploy.yml` recebe |
-| **Permissões** | `packages: write` (usa o `GITHUB_TOKEN` do próprio repositório) |
+| **Permissões** | **quem chama precisa conceder** `packages: write` no job |
+
+```yaml
+  imagem:
+    permissions:        # sem isto o run morre em startup_failure
+      contents: read
+      packages: write
+    uses: slipalison/github-workflows/.github/workflows/build-push.yml@main
+```
+
+Se o padrão do `GITHUB_TOKEN` na conta for somente leitura — e deveria ser —,
+um workflow reutilizável **não pode pedir mais permissão do que quem o chama
+concede**. O erro é `The workflow is requesting 'packages: write', but is only
+allowed 'packages: read'`, e ele não aparece em log de passo nenhum: o run
+inteiro morre antes de começar.
 
 A tag é o commit, não `latest`. É reproduzível, diz de onde veio, e políticas de
 admissão em cluster costumam recusar `latest` — com razão: `latest` é um nome

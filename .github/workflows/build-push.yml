@@ -23,6 +23,11 @@ on:
         required: false
         type: string
         default: "linux/amd64"
+      trivyignores:
+        description: "Arquivo de excecoes do Trivy; vazio = nenhum"
+        required: false
+        type: string
+        default: ""
     outputs:
       tag:
         description: "Tag publicada (sha-<7>)"
@@ -77,6 +82,9 @@ jobs:
           exit-code: '1'
           ignore-unfixed: true
           vuln-type: os,library
-          trivyignores: .trivyignore
+          # Vazio por padrao. Apontar para um arquivo que nao existe nao e
+          # ignorado pelo Trivy: ele sai com "cannot find ignorefile" e derruba
+          # o job — um repositorio sem excecoes nao conseguia usar este workflow.
+          trivyignores: ${{ inputs.trivyignores }}
         env:
           TRIVY_SEVERITY: CRITICAL
