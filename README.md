@@ -2,7 +2,7 @@
 
 Esteira de CI/CD reutilizável. Um repositório de aplicação chama **um** workflow
 e recebe lint, testes, cobertura com piso, imagem com portão de vulnerabilidade,
-seis varreduras de segurança, Sonar com Quality Gate e o commit no GitOps — com
+sete varreduras de segurança, Sonar com Quality Gate e o commit no GitOps — com
 tudo o que pode ser paralelo rodando em paralelo.
 
 ```yaml
@@ -31,7 +31,7 @@ repositório poliglota .NET + dois frontends, e repositório privado.
         ┌─ qualidade  (N componentes, N jobs paralelos)
         ├─ imagem     (build → varre → publica)
 push ───┼─ sonar      (análise + Quality Gate)          ─── portão ─── publicar
-        └─ seguranca  (7 jobs paralelos)                               (só na main)
+        └─ seguranca  (7 varreduras paralelas)                         (só na main)
 ```
 
 O relógio é o do job mais lento, não a soma.
@@ -45,8 +45,23 @@ depende de `pytest`. O que não pode acontecer é imagem de código reprovado
 tag `sha-<commit>` no registro de um commit que falhou não machuca ninguém:
 ninguém a referencia, e o GitOps nunca a aponta.
 
-No `demo-python`, medido: `testes` + `imagem` em fila davam ~2min40. Em
-paralelo, ~1min30.
+Medido no `demo-python` em 2026-09-13, e o resultado não é o que a intuição
+sugere:
+
+| | Jobs | Relógio |
+|---|---|---|
+| Esteira antiga, em fila | 3 | **78s** |
+| Esteira nova, em paralelo | 13 | **100s** |
+
+A nova é 22 segundos **mais lenta**, e faz sete varreduras de segurança, Sonar e
+piso de cobertura que a antiga não fazia. Somados em fila, esses mesmos jobs
+dariam ~5 minutos.
+
+O paralelismo não encurtou o que já existia — ele absorveu o que faltava. Esse
+é o ganho real, e vale dizer assim em vez de anunciar um número menor.
+
+O job `imagem` sozinho subiu de 43s para 79s, de propósito: ele agora constrói,
+varre e **só então** publica.
 
 ---
 

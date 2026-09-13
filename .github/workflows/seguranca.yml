@@ -1,7 +1,15 @@
 name: Seguranca
 
-# Seis varreduras, seis jobs, todos em paralelo. Nenhuma depende da outra e
-# nenhuma depende do build — entao nada aqui espera nada.
+# Sete varreduras, sete jobs, todos em paralelo — mais um job de contexto de
+# cinco segundos. Nenhuma depende da outra e nenhuma depende do build, entao
+# nada aqui espera nada.
+#
+#   Gitleaks e TruffleHog   segredo, no historico inteiro
+#   Semgrep                 SAST rapido, por padrao
+#   CodeQL                  SAST profundo — DESLIGADO por padrao (ver o input)
+#   SCA                     dependencia vulneravel
+#   IaC                     Dockerfile, manifesto e chart — so com caminho_iac
+#   SBOM                    lista do que entrou no build
 #
 # O QUE ESTE ARQUIVO CORRIGE
 # --------------------------

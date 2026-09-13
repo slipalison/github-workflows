@@ -22,8 +22,17 @@ name: Pipeline
 #     sonar      ─┼──>  publicar   (so na main, e so se TUDO passou)
 #     seguranca  ─┘
 #
-# O relogio passa a ser o do job mais lento, e nao a soma. Com o `demo-python`
-# medido, `testes` + `imagem` em fila davam ~2min40; em paralelo, ~1min30.
+# O relogio passa a ser o do job mais lento, e nao a soma.
+#
+# NUMEROS MEDIDOS, e nao estimados (demo-python, 2026-09-13):
+#   esteira antiga, 3 jobs em fila (testes 18s -> imagem 43s -> publicar 9s): 78s
+#   esteira nova, 13 jobs:                                                    100s
+# A nova e 22s mais LENTA de relogio, e faz sete varreduras de seguranca, Sonar
+# e piso de cobertura que a antiga nao fazia. Os mesmos jobs em fila somariam
+# ~5min. O paralelismo nao encurtou o que ja existia: absorveu o que faltava.
+#
+# O job `imagem` sozinho subiu de 43s para 79s de proposito — ele agora constroi,
+# varre e SO ENTAO publica.
 #
 # `publicar` usa `needs` com TODOS eles justamente porque ali o `needs` significa
 # alguma coisa — diferente do `needs: backend-build` do `simulator-ccb`, que so
