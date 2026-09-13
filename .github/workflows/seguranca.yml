@@ -276,7 +276,14 @@ jobs:
           # bloquear por ele so ensina a usar `--skip`. Volta a aparecer no dia
           # em que houver patch.
           ignore-unfixed: true
-          scanners: vuln,secret,misconfig
+          # vuln,secret e SO. `misconfig` estava aqui e foi tirado: esta varredura
+          # bloqueia em `error`, e o job de IaC logo abaixo varre a MESMA
+          # configuracao de proposito SEM bloquear (o Kyverno e o Pod Security
+          # `restricted` ja sao donos daquelas regras dentro do cluster). Com os
+          # dois ligados, a mesma regra tinha dois donos com veredito oposto — e
+          # quem ganhava era o que bloqueava. Foi medido: o DS-0002 do Dockerfile
+          # do demo-python reprovou aqui e passou no IaC, no mesmo run.
+          scanners: vuln,secret
           exit-code: "0"
 
       - name: Enviar para a aba Security
