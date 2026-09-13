@@ -205,8 +205,13 @@ jobs:
       github.event_name != 'pull_request'
       && github.ref == 'refs/heads/main'
       && needs.versao.outputs.salto != 'nenhum'
+    # `packages: write` MESMO SEM IMAGEM. O job `alias` de lancar.yml e pulado
+    # aqui, mas a checagem de permissao e estatica — medido no run #9:
+    #   "The nested job 'alias' is requesting 'packages: write', but is only
+    #    allowed 'packages: none'"  -> startup_failure, sem job nenhum.
     permissions:
       contents: write
+      packages: write
     uses: ./.github/workflows/lancar.yml
     with:
       versao: ${{ needs.versao.outputs.versao }}

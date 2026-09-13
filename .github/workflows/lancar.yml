@@ -19,6 +19,14 @@ name: Lancar versao
 # inicio do run. Se entrou tag ou commit no meio, os dois numeros divergem e o
 # job reprova sem criar nada. Um run cancelado pelo `cancel-in-progress` nao
 # deixa tag, e o proximo chega ao mesmo numero sozinho.
+#
+# QUEM CHAMA CONCEDE `contents: write` E `packages: write` — os dois, sempre
+# ---------------------------------------------------------------------------
+# Mesmo repositorio sem imagem. O job `alias` fica pulado, mas a checagem de
+# permissao do GitHub e ESTATICA: le o arquivo, nao o `if`. Medido, no primeiro
+# run do proprio github-workflows (que nao tem imagem):
+#   "The nested job 'alias' is requesting 'packages: write', but is only
+#    allowed 'packages: none'"  -> startup_failure, sem job nenhum.
 
 on:
   workflow_call:

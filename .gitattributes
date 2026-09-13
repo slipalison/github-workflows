@@ -1,2 +1,5 @@
 *.yaml text eol=lf
 *.yml text eol=lf
+*.py text eol=lf
+*.sh text eol=lf
+hooks/* text eol=lf
