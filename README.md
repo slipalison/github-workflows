@@ -219,6 +219,21 @@ usa o `helm-lint.yml`. Gravar um segredo onde ele não serve não quebra nada ho
 O valor vai por **stdin**, nunca por argumento: `gh secret set --body "$TOKEN"`
 põe o segredo no `argv`, e `argv` é legível por qualquer processo da máquina.
 
+**Ele confere o valor na origem antes de gravar**, e imprime uma impressão
+digital (tamanho + sha256 curto) que identifica sem revelar. Isso também nasceu
+de erro medido: um token mal lido grava sem reclamar, e o sintoma aparece três
+execuções depois num `403` do SonarCloud que manda "conferir o token" — custou
+dois diagnósticos errados antes de chegar na causa. Agora:
+
+```
+Impressao digital: 27 caracteres, sha256 eb224bfb4350
+Conferindo o valor na origem antes de gravar...
+::error::HTTP 401 — o SonarCloud recusou este token. NADA foi gravado.
+```
+
+Em **Git Bash ou MSYS**, prefira `--arquivo` ou a variável de ambiente: o
+`getpass` do Python não lê colagem de forma confiável nesses terminais.
+
 ---
 
 ## O que tem aqui

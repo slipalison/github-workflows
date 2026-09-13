@@ -43,10 +43,14 @@ from __future__ import annotations
 import argparse
 import base64
 import getpass
+import hashlib
 import json
 import os
 import subprocess
 import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
 
 PROPRIO = "github-workflows"
 
@@ -123,6 +127,43 @@ def consome(dono: str, repo: str, padroes: tuple[str, ...]) -> str | None:
     return None
 
 
+def impressao(valor: str) -> str:
+    """Identifica o valor sem revelar o valor.
+
+    Existe porque um segredo mal colado nao tem sintoma: grava sem reclamar,
+    e o erro aparece tres execucoes depois num 403 que manda "conferir o token".
+    Com o tamanho e o sha256 na tela da para comparar com a origem em dois
+    segundos.
+    """
+    return f"{len(valor)} caracteres, sha256 {hashlib.sha256(valor.encode()).hexdigest()[:12]}"
+
+
+def valida_sonar(valor: str) -> str | None:
+    """None se o token presta; a razao, se nao presta.
+
+    Um endpoint que NAO faz analise: so responde quem sou eu. Assim a checagem
+    nao depende do projeto existir, nem de permissao de analise, nem de a
+    Automatic Analysis estar ligada — isola a autenticacao e mais nada.
+    """
+    credencial = base64.b64encode(f"{valor}:".encode()).decode()
+    req = urllib.request.Request(
+        "https://sonarcloud.io/api/users/current",
+        headers={"Authorization": f"Basic {credencial}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            quem = json.load(r)
+        return None if quem.get("login") else "resposta sem login"
+    except urllib.error.HTTPError as e:
+        return f"HTTP {e.code} — o SonarCloud recusou este token"
+    except Exception as e:  # noqa: BLE001 - rede, DNS, TLS: tudo aqui e inconclusivo
+        print(f"  aviso: nao deu para validar ({e}); seguindo sem conferir.")
+        return None
+
+
+VALIDADORES = {"SONAR_TOKEN": valida_sonar}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     grupo = ap.add_mutually_exclusive_group(required=True)
@@ -134,6 +175,15 @@ def main() -> int:
         "--padrao",
         action="append",
         help="texto a procurar nos workflows; repetivel. Sem isto usa PADROES.",
+    )
+    ap.add_argument(
+        "--arquivo",
+        type=Path,
+        help=(
+            "le o valor de um arquivo, em vez do terminal. Use isto no Git Bash "
+            "e no MSYS: o getpass do Python nao le a colagem de forma confiavel "
+            "nesses terminais, e um valor truncado grava sem reclamar."
+        ),
     )
     args = ap.parse_args()
 
@@ -165,16 +215,46 @@ def main() -> int:
         print("Modo --listar: nada foi gravado.")
         return 0
 
-    valor = os.environ.get(args.secret)
-    if valor:
+    if args.arquivo:
+        # strip no fim: um editor quase sempre deixa uma quebra de linha no
+        # final do arquivo, e um token com quebra de linha colada atras e um
+        # token diferente — que o SonarCloud recusa sem explicar por que.
+        valor = args.arquivo.read_text(encoding="utf-8").strip()
+        print(f"Valor lido de {args.arquivo}.")
+    elif os.environ.get(args.secret):
+        valor = os.environ[args.secret]
         print(f"Valor de `{args.secret}` lido do ambiente.")
+    elif not sys.stdin.isatty():
+        valor = sys.stdin.read().strip()
+        print("Valor lido da entrada padrao.")
     else:
-        # getpass, e nao input(): sem eco na tela e sem ir para o historico do
-        # shell. E nunca como argumento — argv e publico na maquina.
+        # getpass, e nao input(): sem eco e sem historico de shell. E nunca como
+        # argumento — argv e publico na maquina.
         valor = getpass.getpass(f"Valor de {args.secret} (nao aparece na tela): ")
-    if not valor.strip():
+    valor = valor.strip()
+    if not valor:
         print("::error::valor vazio; nada foi gravado.")
         return 1
+
+    # A impressao digital vem ANTES da gravacao, para dar para comparar com a
+    # origem. Foi assim que um token mal lido custou tres execucoes da esteira e
+    # dois diagnosticos errados: o erro so aparecia la na frente, num 403 do
+    # SonarCloud que mandava "conferir o token".
+    print(f"Impressao digital: {impressao(valor)}")
+
+    validador = VALIDADORES.get(args.secret)
+    if validador:
+        print("Conferindo o valor na origem antes de gravar...")
+        problema = validador(valor)
+        if problema:
+            print(f"::error::{problema}. NADA foi gravado.")
+            print(
+                "::error::Confira se colou o valor inteiro. Em Git Bash ou MSYS, "
+                "prefira --arquivo ou a variavel de ambiente: o getpass nao le "
+                "colagem de forma confiavel nesses terminais."
+            )
+            return 1
+        print("  ok: a origem aceitou o valor.")
 
     falhas = 0
     for nome, _, _ in alvos:
