@@ -171,6 +171,16 @@ class Calcular(unittest.TestCase):
         self.assertIn("### Sem tipo", texto)
         self.assertIn("mensagem solta que ja entrou", texto)
 
+    def test_faixa_vazia_nao_reprova_ninguem(self):
+        # E o recalculo dentro de lancar.yml: quem julga e o job versao; ali
+        # nada e novo, e os commits antigos sem tipo so entram nas notas.
+        self.repo.commit("mensagem antiga sem tipo")
+        self.repo.commit("outra sem tipo")
+        self.repo.commit("ci: agora sim")
+        rc, s, _, texto = self.repo.calcular("--novos", "HEAD..HEAD", "--esperada", "1.0.0")
+        self.assertEqual((rc, s["versao"], s["sem_tipo"]), (0, "1.0.0", "2"))
+        self.assertIn("### Sem tipo", texto)
+
     def test_head_tageado_nao_salta(self):
         rc, s, _, _ = self.caso("v2.5.1", [])
         self.assertEqual((rc, s["versao"], s["salto"], s["commits"]), (0, "2.5.1", "nenhum", "0"))

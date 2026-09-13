@@ -159,11 +159,18 @@ jobs:
 
       - name: Recalcular e conferir
         # Mesmo script, mesma resposta — ou o run para aqui.
+        #
+        # `novos: HEAD..HEAD` (faixa vazia) de proposito: quem julga commit e o
+        # job `versao`, com a faixa do push. Aqui nada e novo. Sem isto, o
+        # recalculo tratava TODOS os commits desde a tag como novos e reprovava
+        # os antigos sem tipo que o `versao` ja tinha deixado passar — medido no
+        # primeiro run do demo-python: 17 commits, 3 sem tipo, tag nenhuma.
         id: calc
         uses: slipalison/github-workflows/.github/actions/versao@main
         with:
           commits-sem-tipo: ${{ inputs.commits_sem_tipo }}
           versao-inicial: ${{ inputs.versao_inicial }}
+          novos: "HEAD..HEAD"
           esperada: ${{ inputs.versao }}
 
       - name: A tag ainda nao existe?
