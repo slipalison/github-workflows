@@ -110,9 +110,20 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Apontar :<versao> para o digest
-        # Nao reconstroi nada: cria uma tag nova no registro apontando para o
+        # Nao reconstroi nada: publica uma referencia nova no registro para o
         # MESMO manifesto que `sha-<commit>`. A identidade que o cluster usa
-        # continua sendo o sha; a versao e um nome legivel para o mesmo bit.
+        # continua sendo o sha; a versao e um nome legivel para os mesmos bits.
+        #
+        # O DIGEST DE `:<versao>` NAO E O DIGEST DE ORIGEM, e isso confunde.
+        # `imagetools create` nao copia uma tag: ele cria um INDICE OCI novo com
+        # um item so, apontando para o manifesto de origem. Entao
+        #   :sha-597c032 -> sha256:06aadce4...   (manifesto)
+        #   :1.0.0       -> sha256:67ea2b5b...   (indice que contem 06aadce4)
+        # Mesmos bits, embrulho diferente. Medido em 2026-09-13, quando a trava
+        # nova do verificar-plataforma.sh comparou os dois digests direto e
+        # acusou o alias de apontar para outra imagem — o alarme estava errado,
+        # nao o alias. Quem for conferir isso de fora precisa olhar DENTRO do
+        # indice; quem quiser fixar por digest deve usar o do `sha-<commit>`.
         env:
           IMAGEM: ${{ inputs.imagem }}
           DIGEST: ${{ inputs.digest }}
