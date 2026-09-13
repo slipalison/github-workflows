@@ -10,7 +10,10 @@ on:
       chart_version:
         required: false
         type: string
-        default: "0.1.0"
+        # Tem de acompanhar o targetRevision do ApplicationSet no homelab-gitops.
+        # Validar contra outra versao e pior que nao validar: passa no CI e
+        # renderiza diferente no cluster.
+        default: "0.1.1"
       values:
         description: "Caminho do values a validar"
         required: true
