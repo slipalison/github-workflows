@@ -67,17 +67,11 @@ class Soma:
 
     @property
     def pct_linhas(self) -> float:
-        return (
-            100.0 * self.linhas_cobertas / self.linhas_total
-            if self.linhas_total
-            else 0.0
-        )
+        return 100.0 * self.linhas_cobertas / self.linhas_total if self.linhas_total else 0.0
 
     @property
     def pct_ramos(self) -> float:
-        return (
-            100.0 * self.ramos_cobertos / self.ramos_total if self.ramos_total else 0.0
-        )
+        return 100.0 * self.ramos_cobertos / self.ramos_total if self.ramos_total else 0.0
 
 
 def _int(no, *chaves: str) -> int:
@@ -136,9 +130,7 @@ def ler_opencover(raiz: ET.Element) -> Soma:
         nome = modulo.findtext("ModuleName") or "?"
         r = modulo.find("Summary")
         if r is not None and _int(r, "numSequencePoints"):
-            s.modulos.append(
-                (nome, _int(r, "visitedSequencePoints"), _int(r, "numSequencePoints"))
-            )
+            s.modulos.append((nome, _int(r, "visitedSequencePoints"), _int(r, "numSequencePoints")))
     return s
 
 
@@ -182,9 +174,7 @@ def ler_lcov(texto: str) -> Soma:
 
 def ler(caminho: Path) -> Soma:
     texto = caminho.read_text(encoding="utf-8-sig", errors="replace")
-    if caminho.suffix.lower() in (".info", ".lcov") or re.match(
-        r"^\s*(TN:|SF:)", texto
-    ):
+    if caminho.suffix.lower() in (".info", ".lcov") or re.match(r"^\s*(TN:|SF:)", texto):
         return ler_lcov(texto)
     raiz = ET.fromstring(texto)
     if raiz.tag == "CoverageSession":
@@ -204,9 +194,7 @@ def painel(s: Soma, minimo: float, arquivos: list[Path]) -> str:
         f"| **Linhas** | **{s.pct_linhas:.2f}%** ({s.linhas_cobertas}/{s.linhas_total}) |",
     ]
     if s.ramos_total:
-        linhas.append(
-            f"| Ramos | {s.pct_ramos:.2f}% ({s.ramos_cobertos}/{s.ramos_total}) |"
-        )
+        linhas.append(f"| Ramos | {s.pct_ramos:.2f}% ({s.ramos_cobertos}/{s.ramos_total}) |")
     linhas += [f"| Relatorios somados | {len(arquivos)} |", ""]
 
     if s.modulos:
@@ -224,9 +212,7 @@ def painel(s: Soma, minimo: float, arquivos: list[Path]) -> str:
 
     if minimo:
         if aprovado:
-            linhas.append(
-                f"> **Aprovado:** {s.pct_linhas:.2f}% >= piso de {minimo:g}%."
-            )
+            linhas.append(f"> **Aprovado:** {s.pct_linhas:.2f}% >= piso de {minimo:g}%.")
         else:
             falta = (minimo / 100.0 * s.linhas_total) - s.linhas_cobertas
             linhas.append(
@@ -271,9 +257,7 @@ def main() -> int:
             fh.write(texto)
 
     if args.minimo and total.pct_linhas < args.minimo:
-        print(
-            f"::error::Cobertura {total.pct_linhas:.2f}% abaixo do piso de {args.minimo:g}%."
-        )
+        print(f"::error::Cobertura {total.pct_linhas:.2f}% abaixo do piso de {args.minimo:g}%.")
         return 1
     return 0
 

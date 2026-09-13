@@ -70,9 +70,7 @@ def carregar() -> dict:
 
 
 def salvar(dados: dict) -> None:
-    LOCK.write_text(
-        json.dumps(dados, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+    LOCK.write_text(json.dumps(dados, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 def arquivos() -> list[Path]:
@@ -99,9 +97,7 @@ def api(caminho: str) -> dict:
         with urllib.request.urlopen(req, timeout=30) as resposta:
             return json.load(resposta)
 
-    saida = subprocess.run(
-        ["gh", "api", caminho], capture_output=True, text=True, check=True
-    )
+    saida = subprocess.run(["gh", "api", caminho], capture_output=True, text=True, check=True)
     return json.loads(saida.stdout)
 
 
@@ -124,9 +120,7 @@ def sha_da_tag(acao: str, tag: str) -> str:
     return api(f"repos/{acao}/commits/{tag}")["sha"]
 
 
-def percorrer(
-    texto: str, acoes: dict, problemas: list[str], arquivo: Path, proprio: str
-) -> str:
+def percorrer(texto: str, acoes: dict, problemas: list[str], arquivo: Path, proprio: str) -> str:
     def troca(m: re.Match) -> str:
         nome = f"{m['dono']}/{m['repo']}"
         # Auto-referencia fica como esta. Os workflows deste repositorio se
@@ -200,9 +194,7 @@ def main() -> int:
                 "Rode `python bin/pinar_actions.py --aplicar`."
             )
             return 1
-        print(
-            f"Todos os `uses:` de {len(arquivos())} arquivo(s) estao fixados pelo lock."
-        )
+        print(f"Todos os `uses:` de {len(arquivos())} arquivo(s) estao fixados pelo lock.")
         return 0
 
     for arquivo in mudados:

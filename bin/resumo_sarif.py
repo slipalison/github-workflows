@@ -161,9 +161,7 @@ def montar(
 ) -> list[str]:
     contagem = Counter(a["nivel"] for a in achados)
     bloqueantes = (
-        [a for a in achados if NIVEIS.index(a["nivel"]) >= NIVEIS.index(limiar)]
-        if limiar
-        else []
+        [a for a in achados if NIVEIS.index(a["nivel"]) >= NIVEIS.index(limiar)] if limiar else []
     )
 
     saida = [f"## {titulo}", ""]
@@ -185,12 +183,8 @@ def montar(
     saida += ["| Severidade | Achados |", "|---|---|"]
     for nivel in reversed(NIVEIS):
         if contagem.get(nivel):
-            marca = (
-                "**" if limiar and NIVEIS.index(nivel) >= NIVEIS.index(limiar) else ""
-            )
-            saida.append(
-                f"| {marca}{ROTULO[nivel]}{marca} | {marca}{contagem[nivel]}{marca} |"
-            )
+            marca = "**" if limiar and NIVEIS.index(nivel) >= NIVEIS.index(limiar) else ""
+            saida.append(f"| {marca}{ROTULO[nivel]}{marca} | {marca}{contagem[nivel]}{marca} |")
     if not achados:
         saida.append("| - | nenhum |")
     saida.append("")
@@ -206,9 +200,7 @@ def montar(
         saida += ["| Nivel | Regra | Onde | O que |", "|---|---|---|---|"]
         for a in ordenados[:linhas_detalhe]:
             texto = a["texto"][:160].replace("|", "\\|")
-            saida.append(
-                f"| {ROTULO[a['nivel']]} | `{a['regra']}` | `{a['local']}` | {texto} |"
-            )
+            saida.append(f"| {ROTULO[a['nivel']]} | `{a['regra']}` | `{a['local']}` | {texto} |")
         if len(ordenados) > linhas_detalhe:
             saida.append(
                 f"| ... | | | mais {len(ordenados) - linhas_detalhe} achado(s) "
@@ -226,9 +218,7 @@ def montar(
                 "ou acima. Este portao derruba o job."
             )
         else:
-            saida.append(
-                f"> **Aprovado:** nenhum achado em `{ROTULO[limiar]}` ou acima."
-            )
+            saida.append(f"> **Aprovado:** nenhum achado em `{ROTULO[limiar]}` ou acima.")
         saida.append("")
 
     return saida
@@ -244,12 +234,8 @@ def main() -> int:
         default=None,
         help="sai 1 se houver achado neste nivel ou acima; sem isto, so relata",
     )
-    ap.add_argument(
-        "--explicacao", default=None, help="paragrafo com o porque do teste"
-    )
-    ap.add_argument(
-        "--detalhe", type=int, default=40, help="linhas na tabela de achados"
-    )
+    ap.add_argument("--explicacao", default=None, help="paragrafo com o porque do teste")
+    ap.add_argument("--detalhe", type=int, default=40, help="linhas na tabela de achados")
     args = ap.parse_args()
 
     todos: list[dict] = []

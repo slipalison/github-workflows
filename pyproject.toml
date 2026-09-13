@@ -1,0 +1,10 @@
+# Configuracao dos scripts em bin/. Nao ha pacote para publicar aqui — este
+# arquivo existe para que `ruff` no CI e `ruff` na maquina de quem edita usem
+# exatamente as mesmas regras. Sem ele, a formatacao passa local e reprova no
+# CI, ou o contrario.
+[tool.ruff]
+line-length = 100
+target-version = "py311"   # `typing.Self`, usado em bin/cobertura.py
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

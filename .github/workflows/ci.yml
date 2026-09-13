@@ -164,8 +164,11 @@ jobs:
           while read -r referencia; do
             caminho="${referencia#slipalison/github-workflows/}"
             caminho="${caminho%@*}"
-            if [ ! -f "$caminho" ]; then
-              echo "::error::exemplo aponta para $caminho, que nao existe"
+            # Workflow reutilizavel e um ARQUIVO; composite action e um
+            # DIRETORIO com action.yml dentro. A primeira versao so testava -f e
+            # reprovava as tres actions — o teste estava errado, nao o codigo.
+            if [ ! -f "$caminho" ] && [ ! -f "$caminho/action.yml" ]; then
+              echo "::error::referencia aponta para $caminho, que nao existe"
               faltou=1
             fi
           done < <(grep -rhoE 'slipalison/github-workflows/[^@]+@[a-zA-Z0-9._-]+' exemplos/ .github/workflows/ | sort -u)
