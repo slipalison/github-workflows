@@ -57,12 +57,22 @@ jobs:
       # ponto mais sensivel da esteira inteira, e por isso e o unico que trava a
       # saida de rede: `block` com lista, em vez de `audit`. Um passo que tente
       # falar com qualquer outro destino morre aqui, em vez de exfiltrar a chave.
+      #
+      # A PORTA 22 ESTA NA LISTA POR TER FALTADO. A primeira versao so liberava
+      # 443 e o deploy morreu em
+      #   ssh: connect to host github.com port 22: Connection refused
+      # porque a credencial preferida e uma CHAVE DE DEPLOY, e chave de deploy
+      # fala git por SSH. O bloqueio funcionou — bloqueou o trabalho legitimo.
+      # E a razao de `audit` ser o padrao na action `preparar`: `block` com lista
+      # incompleta nao protege, so quebra, e a lista certa sai do relatorio de um
+      # run em `audit`.
       - name: Endurecer o runner
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: block
           allowed-endpoints: >-
             github.com:443
+            github.com:22
             api.github.com:443
             objects.githubusercontent.com:443
 
