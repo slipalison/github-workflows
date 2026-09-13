@@ -67,11 +67,31 @@ runs:
     # persist-credentials: false. Por padrao o checkout DEIXA o token do run
     # gravado em .git/config, e dali qualquer passo seguinte — inclusive um
     # script de dependencia de terceiro — consegue le-lo e empurrar commit.
+    #
+    # O VALOR FALSO FICA NO RAMO DO `||`, NUNCA NO DO `&&`. A primeira versao
+    # era `historico-completo == 'true' && 0 || 1`, e `0` e falso na expressao
+    # do Actions: `true && 0` da 0, `0 || 1` da 1 — historico completo NUNCA
+    # foi pedido, para ninguem. Medido no job `versao` do primeiro run com
+    # versionamento: "1 commit(s)" num repositorio de 23, e `github.event.before`
+    # inexistente no clone. Ate ali o Sonar media "New Code" em clone raso e a
+    # varredura de segredo "no historico inteiro" via um commit so — os dois
+    # verdes. A trava logo abaixo existe para isso nao voltar calado.
     - name: Checkout
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         persist-credentials: false
-        fetch-depth: ${{ inputs.historico-completo == 'true' && 0 || 1 }}
+        fetch-depth: ${{ inputs.historico-completo != 'true' && 1 || 0 }}
+
+    - name: O historico veio inteiro?
+      if: inputs.historico-completo == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+          echo "::error::historico-completo foi pedido e o clone veio raso. Nada que dependa do historico (versao, Sonar, varredura de segredo) pode confiar neste checkout."
+          exit 1
+        fi
+        echo "Historico completo: $(git rev-list --count HEAD) commit(s), $(git tag | wc -l) tag(s)."
 
     # O `cache:` do setup-python e do setup-node FALHA — nao avisa, falha — quando
     # nao encontra arquivo de dependencia:
