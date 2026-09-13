@@ -46,21 +46,31 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Conferir que ha credencial
+      # O contexto `secrets` NAO existe em `if:` de passo — a mensagem e
+      # "Unrecognized named-value: 'secrets'", e ela derruba o run inteiro em
+      # startup_failure. O caminho e ler o segredo num passo (onde `env` o
+      # aceita) e decidir pelo output dele.
+      - name: Escolher a credencial
+        id: cred
         env:
-          TEM_CHAVE: ${{ secrets.GITOPS_SSH_KEY != '' }}
-          TEM_TOKEN: ${{ secrets.GITOPS_TOKEN != '' }}
+          CHAVE: ${{ secrets.GITOPS_SSH_KEY }}
+          TOKEN: ${{ secrets.GITOPS_TOKEN }}
         run: |
           set -euo pipefail
-          if [ "$TEM_CHAVE" != "true" ] && [ "$TEM_TOKEN" != "true" ]; then
+          if [ -n "${CHAVE:-}" ]; then
+            echo "tipo=chave" >> "$GITHUB_OUTPUT"
+            echo "Credencial: chave de deploy (alcanca so o repositorio de GitOps)."
+          elif [ -n "${TOKEN:-}" ]; then
+            echo "tipo=token" >> "$GITHUB_OUTPUT"
+            echo "Credencial: token fine-grained."
+          else
             echo "::error::Nem GITOPS_SSH_KEY nem GITOPS_TOKEN foram passados."
             echo "::error::Sem credencial nao ha onde escrever a tag."
             exit 1
           fi
-          echo "credencial: $([ "$TEM_CHAVE" = "true" ] && echo "chave de deploy" || echo "token")"
 
       - name: Checkout do GitOps (chave de deploy)
-        if: ${{ secrets.GITOPS_SSH_KEY != '' }}
+        if: steps.cred.outputs.tipo == 'chave'
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.gitops_repo }}
@@ -68,7 +78,7 @@ jobs:
           path: gitops
 
       - name: Checkout do GitOps (token)
-        if: ${{ secrets.GITOPS_SSH_KEY == '' && secrets.GITOPS_TOKEN != '' }}
+        if: steps.cred.outputs.tipo == 'token'
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.gitops_repo }}
