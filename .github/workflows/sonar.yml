@@ -127,6 +127,30 @@ jobs:
           echo "::error::Crie o secret SONAR_TOKEN no repositorio, ou passe exigir_token: false se a ausencia for intencional."
           exit 1
 
+      # SONAR_HOST_URL e para SonarQube SERVER. Para o SonarQube CLOUD o README
+      # da action e explicito: "Not needed for SonarQube Cloud". Passando mesmo
+      # assim, o scanner trata a Cloud como um servidor auto-hospedado, tenta
+      # provisionar o JRE pelo caminho de servidor e leva 403:
+      #
+      #   ERROR Failed to query JRE metadata: GET
+      #   https://api.sonarcloud.io/analysis/jres?os=linux&arch=x86_64
+      #   failed with HTTP 403 Forbidden
+      #
+      # A mensagem manda conferir o token, e o token estava certo. Foi medido:
+      # com o token recem-criado e valido, o job falhou tres vezes seguidas ate
+      # esta linha sair.
+      - name: Cloud ou Server?
+        if: env.SONAR_TOKEN != ''
+        id: destino
+        env:
+          HOST: ${{ inputs.host }}
+        run: |
+          set -euo pipefail
+          case "$HOST" in
+            *sonarcloud.io*|*sonarqube.com*) echo "cloud=true"  >> "$GITHUB_OUTPUT" ;;
+            *)                               echo "cloud=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
       - name: Preparar
         uses: slipalison/github-workflows/.github/actions/preparar@main
         with:
@@ -223,7 +247,11 @@ jobs:
             if [ -n "$ORGANIZACAO" ]; then
               echo "sonar.organization=$ORGANIZACAO"
             fi
-            echo "sonar.host.url=$HOST"
+            # Na Cloud, quem resolve o endereco e o proprio scanner a partir da
+            # organizacao. Escrever a URL aqui reproduz o mesmo erro do env.
+            if [ "${{ steps.destino.outputs.cloud }}" != "true" ]; then
+              echo "sonar.host.url=$HOST"
+            fi
             echo "sonar.qualitygate.wait=true"
             echo "sonar.scm.provider=git"
             printf '%s\n' "$PARAMETROS"
@@ -236,7 +264,9 @@ jobs:
         uses: SonarSource/sonarqube-scan-action@22918119ff8e1ca75a623e15c8296b6ea4fbe28f # v8.2.1
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ inputs.host }}
+          # Vazio em Cloud, de proposito: a action so usa a variavel quando ela
+          # tem valor, e com valor ela muda o modo de autenticacao.
+          SONAR_HOST_URL: ${{ steps.destino.outputs.cloud == 'true' && '' || inputs.host }}
 
       - name: Registrar o resultado no painel
         if: always() && env.SONAR_TOKEN != ''
