@@ -22,7 +22,8 @@ jobs:
 ```
 
 Exemplos completos e comentados em [`exemplos/`](exemplos/): Python simples,
-repositório poliglota .NET + dois frontends, e repositório privado.
+repositório poliglota .NET + dois frontends, monorepo Rust + React numa imagem
+só, e repositório privado.
 
 ---
 
@@ -376,7 +377,7 @@ escrito à mão, e nenhum commit de bot na `main`.
 | Arquivo | O que faz |
 |---|---|
 | [`pipeline.yml`](.github/workflows/pipeline.yml) | Orquestrador. É o único que a aplicação precisa chamar. |
-| [`qualidade.yml`](.github/workflows/qualidade.yml) | Lint, testes e cobertura — um job paralelo por componente. dotnet, python, node, go. |
+| [`qualidade.yml`](.github/workflows/qualidade.yml) | Lint, testes e cobertura — um job paralelo por componente. dotnet, python, node, go, rust. |
 | [`seguranca.yml`](.github/workflows/seguranca.yml) | Gitleaks, TruffleHog, Semgrep, CodeQL, SCA (Trivy fs), IaC e SBOM, em paralelo. |
 | [`sonar.yml`](.github/workflows/sonar.yml) | SonarQube/Cloud com Quality Gate e o guard anti-pulo. |
 | [`build-push.yml`](.github/workflows/build-push.yml) | Imagem: constrói, varre, publica. Devolve `tag` e `digest`. |
@@ -428,16 +429,46 @@ componentes: |
 | Campo | |
 |---|---|
 | `nome` | rótulo do job e do artefato. Sem ele a tela mostra `qualidade (Object)` em todos. |
-| `linguagem` | `dotnet` \| `python` \| `node` \| `go` |
+| `linguagem` | `dotnet` \| `python` \| `node` \| `go` \| `rust` |
 | `versao` | opcional |
 | `caminho` | diretório de trabalho, padrão `.` |
-| `projeto` | dotnet: `.sln`/`.csproj` · node: workspace · go: `./...` |
+| `projeto` | dotnet: `.sln`/`.csproj` · node: workspace · go: `./...` · rust: pacote do workspace (`--package`), vazio = `--workspace` |
 | `cobertura` | piso em %; `0` (padrão) desliga |
 | `scripts_de_instalacao` | node: `true` deixa o `npm ci` rodar `postinstall` e afins. O padrão é `--ignore-scripts`: script de instalação roda antes de qualquer teste, e é o vetor clássico de pacote comprometido. Ligue só para pacote nativo que precise compilar. |
 
 `fail-fast: false` de propósito: o padrão mata os outros componentes quando um
 falha e mostra só o primeiro erro — com três componentes, isso vira três rodadas
 de CI para descobrir três problemas que dava para ver de uma vez.
+
+### Rust
+
+Entrou em 2026-09-15, com o `basalto`. Três decisões que valem registrar:
+
+**Sem action de terceiro.** A imagem do runner já traz o toolchain stable com
+`cargo` e `rustup` no PATH. Uma action só para instalar o que já existe seria
+mais uma dependência fixada por SHA, com acesso ao token do run, para fazer
+nada. `preparar` só acrescenta os componentes (`rustfmt`, `clippy`,
+`llvm-tools-preview`) e, quando `versao` vem preenchida, instala e fixa aquele
+toolchain.
+
+**`cargo-llvm-cov` por binário pronto, em versão fixa.** Compilar a ferramenta
+custa perto de dois minutos e ela não é o que está sendo testado. A versão é
+fixa e não `latest/download` — mesmo argumento dos SHAs em `actions.lock.json`:
+`latest` é ponteiro móvel, e quem publica decide o que roda aqui dentro.
+
+**`cargo llvm-cov` já roda os testes.** Não há `cargo test` antes dele: seria a
+mesma suíte duas vezes. A cobertura sai em LCOV, que é o que o portão desta
+esteira lê e o que o Sonar importa.
+
+Dois caches, em lugares diferentes e por um motivo: `~/.cargo/registry` e
+`~/.cargo/git` são globais e ficam em `preparar`; o `target/` depende do
+`caminho` do componente, e um passo `uses:` ignora
+`defaults.run.working-directory` — então ele é cacheado em `qualidade.yml`, onde
+o caminho é conhecido.
+
+No Sonar, as propriedades são `sonar.rust.lcov.reportPaths` (ou
+`sonar.rust.cobertura.reportPaths`) e `sonar.rust.cargo.manifestPaths`. O
+analisador roda o Clippy sozinho — `sonar.rust.clippy.enabled` vem ligado.
 
 ---
 

@@ -16,10 +16,11 @@ name: Qualidade
 #
 # Um componente e um objeto JSON:
 #   nome         rotulo do job e do artefato
-#   linguagem    dotnet | python | node | go
+#   linguagem    dotnet | python | node | go | rust
 #   versao       opcional; vazio = padrao da action `preparar`
 #   caminho      diretorio de trabalho, padrao "."
 #   projeto      dotnet: .sln/.slnx/.csproj | node: workspace | go: ./...
+#                rust: pacote do workspace (--package); vazio = --workspace
 #   cobertura    piso em %; 0 (padrao) desliga o portao daquele componente
 #   scripts_de_instalacao
 #                node: true deixa o `npm ci` rodar os scripts de instalacao
@@ -172,6 +173,65 @@ jobs:
           # SonarQube usa para Go.
           go run github.com/boumenot/gocover-cobertura@latest \
             < resultados/cobertura.out > resultados/coverage.xml
+
+      # ------------------------------------------------------------------ rust
+      # O `target/` e o cache que paga: sem ele todo run recompila o grafo de
+      # dependencias inteiro. Fica aqui, e nao em `preparar`, porque a chave
+      # depende do caminho do componente — e um `uses:` ignora
+      # `defaults.run.working-directory`, entao o caminho precisa estar escrito
+      # no `path`.
+      - name: Cache do target
+        if: matrix.c.linguagem == 'rust'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ matrix.c.caminho || '.' }}/target
+          key: alvo-${{ runner.os }}-${{ matrix.c.nome }}-${{ hashFiles(format('{0}/Cargo.lock', matrix.c.caminho || '.')) }}
+          restore-keys: alvo-${{ runner.os }}-${{ matrix.c.nome }}-
+
+      - name: cargo fmt --check
+        if: matrix.c.linguagem == 'rust'
+        # Formatacao e defeito de codigo sao coisas diferentes, e cada uma no seu
+        # passo: a tela de falha diz qual foi sem ninguem abrir o log.
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        if: matrix.c.linguagem == 'rust'
+        # `-D warnings` transforma lint em erro. Sem isso o clippy vira decoracao:
+        # ninguem le aviso em log verde.
+        # `--all-targets` inclui testes, exemplos e benches — onde o codigo
+        # descuidado costuma morar.
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Instalar cargo-llvm-cov
+        if: matrix.c.linguagem == 'rust'
+        # Binario pronto em vez de `cargo install`: compilar a ferramenta leva
+        # perto de dois minutos e ela nao e o que estamos testando.
+        #
+        # A VERSAO E FIXA, e nao `latest/download`. Mesmo argumento dos SHAs das
+        # actions em actions.lock.json: `latest` e ponteiro movel, e quem publica
+        # decide o que roda aqui dentro. Para subir, troque o numero e abra PR.
+        env:
+          VERSAO_LLVM_COV: "0.9.1"
+        run: |
+          set -euo pipefail
+          url="https://github.com/taiki-e/cargo-llvm-cov/releases/download/v${VERSAO_LLVM_COV}/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz"
+          curl --proto '=https' --tlsv1.2 -fsSL "$url" | tar xzf - -C "$HOME/.cargo/bin"
+          cargo llvm-cov --version
+
+      - name: cargo test com cobertura
+        if: matrix.c.linguagem == 'rust'
+        # `cargo llvm-cov` JA roda os testes: um `cargo test` antes disso seria
+        # a mesma suite duas vezes. Cobertura em LCOV porque e o que o portao
+        # desta esteira le e o que o Sonar importa em
+        # `sonar.rust.lcov.reportPaths`.
+        env:
+          PACOTE: ${{ matrix.c.projeto && format('--package {0}', matrix.c.projeto) || '--workspace' }}
+        run: |
+          set -euo pipefail
+          mkdir -p resultados
+          # shellcheck disable=SC2086
+          cargo llvm-cov --all-features $PACOTE \
+            --lcov --output-path resultados/lcov.info
 
       # --------------------------------------------------------------- comum --
       - name: Cobertura
