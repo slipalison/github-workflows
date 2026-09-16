@@ -51,14 +51,6 @@ on:
         required: false
         type: string
         default: ""
-      scripts_de_instalacao:
-        description: >-
-          Deixa o `npm ci` rodar postinstall das dependencias. O padrao e
-          --ignore-scripts: um pacote comprometido executa na instalacao, antes
-          de qualquer portao. Ligue so se algum pacote nativo precisar compilar.
-        required: false
-        type: boolean
-        default: false
       comando_de_build:
         description: "Script de build. Vazio nao constroi."
         required: false
@@ -117,17 +109,17 @@ jobs:
           echo "NPM_CONFIG_USERCONFIG=$config" >> "$GITHUB_ENV"
           echo "Registro: $REGISTRO (escopo ${ESCOPO:-nenhum})"
 
+      # SEMPRE --ignore-scripts, e sem botao para desligar.
+      #
+      # `postinstall` de dependencia e o vetor classico de pacote npm
+      # comprometido: ele roda na INSTALACAO, antes de teste, de varredura e de
+      # qualquer portao — e este job carrega um token de publicacao. Um botao
+      # "so desta vez" seria apertado numa sexta-feira. Se um dia um pacote
+      # nativo precisar compilar aqui, o botao volta com o motivo escrito.
       - name: npm ci
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN || github.token }}
-          SCRIPTS: ${{ inputs.scripts_de_instalacao }}
-        run: |
-          set -euo pipefail
-          if [ "$SCRIPTS" = "true" ]; then
-            npm ci
-          else
-            npm ci --ignore-scripts
-          fi
+        run: npm ci --ignore-scripts
 
       - name: Construir
         if: inputs.comando_de_build != ''
