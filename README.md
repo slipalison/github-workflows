@@ -192,6 +192,36 @@ O que **não** se faz é deixar um repositório privado sem análise e fingir qu
 portão existe. Para isso há `sonar_exigir_token: false`, que é explícito, aparece
 no diff, e emite `::warning::` em todo run.
 
+### Preparar um repositório do zero, num comando
+
+[`bin/preparar_repositorios.py`](bin/preparar_repositorios.py) faz a sequência
+inteira: gera a chave `ed25519`, sobe como **deploy key com escrita** no
+repositório de GitOps, grava `GITOPS_SSH_KEY` e `SONAR_TOKEN`, e roda a
+conferência no fim.
+
+```bash
+python bin/preparar_repositorios.py --tudo                       # gera a chave e grava tudo
+python bin/preparar_repositorios.py --secrets --chave ~/.ssh/gitops_ci   # a chave já existe
+python bin/preparar_repositorios.py --chave-nova                 # só a deploy key
+python bin/preparar_repositorios.py --conferir                   # só o relatório
+```
+
+**Ele não reimplementa o semeador** — chama o `semear_secret.py` como
+subprocesso. Descoberta, impressão digital, validação na origem e a regra de o
+valor ir por stdin continuam morando num lugar só.
+
+Nasceu de dois tropeços reais, os dois na fronteira entre bash e PowerShell:
+`chmod`, que não existe no Windows, e `-N ""`, que o PowerShell entrega ao
+`ssh-keygen` como uma **passphrase literal de dois caracteres** — o que produz
+uma chave que o Actions não consegue usar, falhando lá na frente com um erro que
+não diz isso. Aqui os argumentos vão por lista, sem shell no meio, e o problema
+deixa de existir nos dois sistemas.
+
+O token continua **nunca vindo por argumento**: variável de ambiente, arquivo,
+ou digitado sem eco. `argv` é legível por qualquer processo da máquina. Os
+arquivos temporários ficam num diretório que some no `finally`, mesmo quando
+algo falha no meio.
+
 ### O secret em vários repositórios de uma vez
 
 Não existe secret de Actions global para conta pessoal — o `gh` é explícito:
@@ -202,17 +232,62 @@ problema, divide em dois.
 [`bin/semear_secret.py`](bin/semear_secret.py) resolve os dois com um comando:
 
 ```bash
-python bin/semear_secret.py --listar            # quem receberia, sem gravar
-SONAR_TOKEN=... python bin/semear_secret.py --aplicar
-python bin/semear_secret.py --aplicar --secret GITOPS_SSH_KEY
+# O QUE FALTA, EM QUEM. Não grava nada. Sai 1 se faltar algum — serve de
+# tarefa agendada ou de passo de CI.
+python bin/semear_secret.py --conferir
+
+python bin/semear_secret.py --listar --secret SONAR_TOKEN   # quem receberia
+SONAR_TOKEN=... python bin/semear_secret.py --aplicar --secret SONAR_TOKEN
+
+# Vários numa passada: um arquivo por secret, com o NOME do secret como nome
+# do arquivo, num diretório FORA de qualquer repositório.
+python bin/semear_secret.py --aplicar     --secret SONAR_TOKEN --secret NPM_TOKEN     --de-diretorio ~/.config/segredos-github
+
+# TODOS os repositórios da conta, e não só os que usam o secret.
+python bin/semear_secret.py --listar  --todos --secret NPM_TOKEN   # a lista, sem gravar
+NPM_TOKEN=... python bin/semear_secret.py --aplicar --todos --secret NPM_TOKEN
 ```
 
-Duas decisões dentro dele, e as duas vieram de erro medido na primeira execução:
+**`--todos` grava onde o secret não é usado, e isso é escolha de quem roda.**
+O padrão continua sendo a descoberta, porque uma cópia a mais é mais um lugar
+de onde o segredo pode vazar e mais um para lembrar de trocar na rotação — com
+82 repositórios, são 82 cópias. O modo existe para quem prefere gravar uma vez
+em tudo a voltar aqui a cada repositório novo. Ele mostra a conta na tela e
+**pede confirmação digitada**; `--listar --todos` mostra a lista antes, e
+`--sim` pula a pergunta em script. Com `--todos` o secret também não precisa
+estar em `PADROES` — não há o que descobrir.
+
+Os secrets que ele conhece, e como cada um encontra o próprio público:
+
+| Secret | Quem consome | Validado antes de gravar |
+|---|---|---|
+| `SONAR_TOKEN` | quem chama o `sonar.yml` ou passa `sonar_projeto` | `GET /api/users/current` do SonarCloud |
+| `GITOPS_SSH_KEY` | quem chama o `deploy.yml` ou o `pipeline.yml` | — |
+| `GITOPS_TOKEN` | idem — **alternativa** à chave SSH, não um segundo requisito | — |
+| `NPM_TOKEN` | quem referencia `secrets.NPM_TOKEN` no próprio workflow | `GET /-/whoami` do registry |
+
+O `NPM_TOKEN` é o único cujo padrão **não** é o caminho desta esteira: quem
+publica no npm tem workflow próprio. O critério vira a referência ao próprio
+secret, que é o mais honesto que existe — se um workflow o lê, aquele
+repositório precisa dele.
+
+**Alternativas contam como atendidas.** `GITOPS_SSH_KEY` e `GITOPS_TOKEN` se
+substituem: o `deploy.yml` usa o que encontrar. Sem essa tabela o `--conferir`
+acusava o `demo-python` de estar sem `GITOPS_TOKEN`, que ele não precisa ter —
+e um relatório que aponta problema onde não há é um relatório que se aprende a
+ignorar.
+
+Três decisões dentro dele, e as três vieram de erro medido:
 
 **A lista não é mantida à mão.** Ele lê os workflows de cada repositório e
 descobre quem consome aquele secret. Uma lista escrita à mão envelhece calada —
 alguém adota a esteira, esquece de acrescentar, e na próxima rotação aquele
 repositório fica com o token velho.
+
+**Faltar um secret precisa ter como perguntar.** Até 2026-09-16 a única forma
+de descobrir era a esteira reprovar — foi o que aconteceu com o `basalto`, que
+nasceu sem `SONAR_TOKEN` e sem `GITOPS_SSH_KEY` e só mostrou isso num job
+vermelho depois de a esteira inteira rodar. `--conferir` responde antes.
 
 **O critério é o caminho qualificado, não o nome do arquivo.** Procurar
 `pipeline.yml` trouxe o `TranslateReader`, que tem um `pipeline.yml` próprio sem
