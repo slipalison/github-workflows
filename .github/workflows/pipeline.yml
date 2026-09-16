@@ -178,6 +178,22 @@ on:
         required: false
         type: string
         default: "main"
+    outputs:
+      versao:
+        description: >-
+          A versao que este run calculou (1.4.0). Vazia quando `versionar` e
+          false, ou quando o job de versao nao rodou.
+        value: ${{ jobs.versao.outputs.versao }}
+      tag:
+        description: "A mesma como tag (v1.4.0)"
+        value: ${{ jobs.versao.outputs.tag }}
+      salto:
+        description: >-
+          major | minor | patch | inicial | nenhum. `nenhum` significa que o
+          HEAD ja estava tageado — util para quem chama decidir se ha o que
+          publicar.
+        value: ${{ jobs.versao.outputs.salto }}
+
     secrets:
       SONAR_TOKEN:
         required: false

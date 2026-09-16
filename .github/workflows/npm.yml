@@ -1,0 +1,181 @@
+name: npm
+
+# Publica um pacote npm — no registro do GitHub por padrao, no npmjs.com se
+# mandarem.
+#
+# POR QUE ELE RODA NO MESMO RUN
+# ------------------------------
+# A tentacao e disparar a publicacao com `on: release: published`, que o
+# `lancar` acabou de criar. Nao funciona: release criada com o GITHUB_TOKEN
+# NAO dispara outro workflow (o mesmo motivo esta escrito no cabecalho do
+# `lancar.yml`). O caminho que funciona sem PAT e o que esta aqui — quem chama
+# passa a versao que o `versao` calculou, no mesmo run.
+#
+# PUBLICAR DUAS VEZES A MESMA VERSAO E ERRO NO REGISTRO, NAO AVISO
+# ----------------------------------------------------------------
+# Um run repetido na main (re-run manual, push sem commit novo) chega aqui com
+# a versao que ja foi publicada, e o `npm publish` devolve 409. Isso reprovaria
+# uma esteira que nao tem nada de errado. Por isso o passo `Ja existe?` olha o
+# registro antes e PULA — nao ha o que publicar, e pular e o resultado certo.
+#
+# O TOKEN NUNCA PASSA POR ARGV
+# -----------------------------
+# Ele entra por variavel de ambiente e e lido de um `.npmrc` em $RUNNER_TEMP.
+# `npm publish --//registro/:_authToken=...` colocaria o segredo na linha de
+# comando, legivel por qualquer processo da maquina.
+
+on:
+  workflow_call:
+    inputs:
+      versao:
+        description: "A versao a publicar (1.4.0), sem o 'v'"
+        required: true
+        type: string
+      caminho:
+        description: "Diretorio do pacote, para monorepo"
+        required: false
+        type: string
+        default: "."
+      registro:
+        description: "Registro de destino"
+        required: false
+        type: string
+        default: "https://npm.pkg.github.com"
+      escopo:
+        description: "Escopo do pacote, com @. Vazio publica pacote sem escopo."
+        required: false
+        type: string
+        default: "@slipalison"
+      node:
+        description: "Versao do Node; vazio = o padrao da action preparar"
+        required: false
+        type: string
+        default: ""
+      comando_de_build:
+        description: "Script de build. Vazio nao constroi."
+        required: false
+        type: string
+        default: "build"
+      timeout:
+        required: false
+        type: number
+        default: 15
+    secrets:
+      NPM_TOKEN:
+        description: >-
+          So para registro que nao seja o do GitHub. No GitHub Packages o
+          GITHUB_TOKEN do proprio run basta, e nao ha segredo para rotacionar.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  publicar:
+    name: Publicar no npm
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout }}
+    permissions:
+      contents: read
+      # O que autoriza escrever no GitHub Packages. Quem chama precisa conceder.
+      packages: write
+    defaults:
+      run:
+        working-directory: ${{ inputs.caminho }}
+    steps:
+      - name: Preparar
+        uses: slipalison/github-workflows/.github/actions/preparar@main
+        with:
+          linguagem: node
+          versao: ${{ inputs.node }}
+
+      - name: Configurar o registro
+        env:
+          REGISTRO: ${{ inputs.registro }}
+          ESCOPO: ${{ inputs.escopo }}
+        run: |
+          set -euo pipefail
+          host="${REGISTRO#https://}"
+          host="${host%/}"
+          config="$RUNNER_TEMP/.npmrc"
+          : > "$config"
+          # 600 antes de escrever: entre criar o arquivo e apertar a permissao
+          # existe uma janela, curta mas real, com o segredo legivel.
+          chmod 600 "$config"
+          if [ -n "$ESCOPO" ]; then
+            echo "${ESCOPO}:registry=${REGISTRO}" >> "$config"
+          fi
+          echo "//${host}/:_authToken=\${NODE_AUTH_TOKEN}" >> "$config"
+          echo "NPM_CONFIG_USERCONFIG=$config" >> "$GITHUB_ENV"
+          echo "Registro: $REGISTRO (escopo ${ESCOPO:-nenhum})"
+
+      # SEMPRE --ignore-scripts, e sem botao para desligar.
+      #
+      # `postinstall` de dependencia e o vetor classico de pacote npm
+      # comprometido: ele roda na INSTALACAO, antes de teste, de varredura e de
+      # qualquer portao — e este job carrega um token de publicacao. Um botao
+      # "so desta vez" seria apertado numa sexta-feira. Se um dia um pacote
+      # nativo precisar compilar aqui, o botao volta com o motivo escrito.
+      - name: npm ci
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN || github.token }}
+        run: npm ci --ignore-scripts
+
+      - name: Construir
+        if: inputs.comando_de_build != ''
+        env:
+          COMANDO: ${{ inputs.comando_de_build }}
+        run: npm run "$COMANDO"
+
+      - name: Ja existe esta versao no registro?
+        id: existe
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN || github.token }}
+          VERSAO: ${{ inputs.versao }}
+        run: |
+          set -euo pipefail
+          nome="$(node -p "require('./package.json').name")"
+          echo "pacote=$nome" >> "$GITHUB_OUTPUT"
+          # `npm view` devolve 404 (E404) quando o pacote ainda nao existe, e
+          # esse e o caso do primeiro run — nao e erro.
+          if npm view "${nome}@${VERSAO}" version >/dev/null 2>&1; then
+            echo "ja=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::${nome}@${VERSAO} ja esta publicado; nada a fazer."
+          else
+            echo "ja=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Gravar a versao no package.json
+        if: steps.existe.outputs.ja == 'false'
+        env:
+          VERSAO: ${{ inputs.versao }}
+        run: |
+          set -euo pipefail
+          # Sem tag e sem commit: a tag e do `lancar`, e duas tags para a mesma
+          # versao e uma a mais do que existe de verdade.
+          npm version "$VERSAO" --no-git-tag-version --allow-same-version
+
+      - name: Publicar
+        if: steps.existe.outputs.ja == 'false'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN || github.token }}
+        run: npm publish
+
+      - name: Resumo
+        if: always()
+        env:
+          PACOTE: ${{ steps.existe.outputs.pacote }}
+          VERSAO: ${{ inputs.versao }}
+          JA: ${{ steps.existe.outputs.ja }}
+          REGISTRO: ${{ inputs.registro }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### npm"
+            echo
+            if [ "$JA" = "true" ]; then
+              echo "\`${PACOTE}@${VERSAO}\` ja estava publicado — nada enviado."
+            else
+              echo "Publicado \`${PACOTE}@${VERSAO}\` em ${REGISTRO}."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
