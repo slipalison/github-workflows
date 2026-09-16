@@ -202,17 +202,49 @@ problema, divide em dois.
 [`bin/semear_secret.py`](bin/semear_secret.py) resolve os dois com um comando:
 
 ```bash
-python bin/semear_secret.py --listar            # quem receberia, sem gravar
-SONAR_TOKEN=... python bin/semear_secret.py --aplicar
-python bin/semear_secret.py --aplicar --secret GITOPS_SSH_KEY
+# O QUE FALTA, EM QUEM. Não grava nada. Sai 1 se faltar algum — serve de
+# tarefa agendada ou de passo de CI.
+python bin/semear_secret.py --conferir
+
+python bin/semear_secret.py --listar --secret SONAR_TOKEN   # quem receberia
+SONAR_TOKEN=... python bin/semear_secret.py --aplicar --secret SONAR_TOKEN
+
+# Vários numa passada: um arquivo por secret, com o NOME do secret como nome
+# do arquivo, num diretório FORA de qualquer repositório.
+python bin/semear_secret.py --aplicar     --secret SONAR_TOKEN --secret NPM_TOKEN     --de-diretorio ~/.config/segredos-github
 ```
 
-Duas decisões dentro dele, e as duas vieram de erro medido na primeira execução:
+Os secrets que ele conhece, e como cada um encontra o próprio público:
+
+| Secret | Quem consome | Validado antes de gravar |
+|---|---|---|
+| `SONAR_TOKEN` | quem chama o `sonar.yml` ou passa `sonar_projeto` | `GET /api/users/current` do SonarCloud |
+| `GITOPS_SSH_KEY` | quem chama o `deploy.yml` ou o `pipeline.yml` | — |
+| `GITOPS_TOKEN` | idem — **alternativa** à chave SSH, não um segundo requisito | — |
+| `NPM_TOKEN` | quem referencia `secrets.NPM_TOKEN` no próprio workflow | `GET /-/whoami` do registry |
+
+O `NPM_TOKEN` é o único cujo padrão **não** é o caminho desta esteira: quem
+publica no npm tem workflow próprio. O critério vira a referência ao próprio
+secret, que é o mais honesto que existe — se um workflow o lê, aquele
+repositório precisa dele.
+
+**Alternativas contam como atendidas.** `GITOPS_SSH_KEY` e `GITOPS_TOKEN` se
+substituem: o `deploy.yml` usa o que encontrar. Sem essa tabela o `--conferir`
+acusava o `demo-python` de estar sem `GITOPS_TOKEN`, que ele não precisa ter —
+e um relatório que aponta problema onde não há é um relatório que se aprende a
+ignorar.
+
+Três decisões dentro dele, e as três vieram de erro medido:
 
 **A lista não é mantida à mão.** Ele lê os workflows de cada repositório e
 descobre quem consome aquele secret. Uma lista escrita à mão envelhece calada —
 alguém adota a esteira, esquece de acrescentar, e na próxima rotação aquele
 repositório fica com o token velho.
+
+**Faltar um secret precisa ter como perguntar.** Até 2026-09-16 a única forma
+de descobrir era a esteira reprovar — foi o que aconteceu com o `basalto`, que
+nasceu sem `SONAR_TOKEN` e sem `GITOPS_SSH_KEY` e só mostrou isso num job
+vermelho depois de a esteira inteira rodar. `--conferir` responde antes.
 
 **O critério é o caminho qualificado, não o nome do arquivo.** Procurar
 `pipeline.yml` trouxe o `TranslateReader`, que tem um `pipeline.yml` próprio sem

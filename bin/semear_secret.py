@@ -31,9 +31,20 @@ aparece em lugar nenhum. Pelo mesmo motivo o script nunca aceita o token como
 argumento: ou vem do ambiente, ou e digitado sem eco.
 
 USO
-    python bin/semear_secret.py --listar
-    SONAR_TOKEN=... python bin/semear_secret.py --aplicar
-    python bin/semear_secret.py --aplicar --secret GITOPS_SSH_KEY
+    # o que falta, em quem, sem gravar nada. Sai 1 se faltar algum.
+    python bin/semear_secret.py --conferir
+
+    # quem receberia, sem gravar
+    python bin/semear_secret.py --listar --secret SONAR_TOKEN
+
+    # gravar um
+    SONAR_TOKEN=... python bin/semear_secret.py --aplicar --secret SONAR_TOKEN
+
+    # gravar varios numa passada: um arquivo por secret, com o NOME do secret
+    # como nome do arquivo, num diretorio FORA de qualquer repositorio
+    python bin/semear_secret.py --aplicar \
+        --secret SONAR_TOKEN --secret GITOPS_SSH_KEY \
+        --de-diretorio ~/.config/segredos-github
 
 Rotacionar e rodar de novo: o `gh secret set` sobrescreve.
 """
@@ -78,6 +89,25 @@ PADROES = {
     "SONAR_TOKEN": (f"{_AQUI}/sonar.yml", "sonar_projeto"),
     "GITOPS_SSH_KEY": (f"{_AQUI}/deploy.yml", f"{_AQUI}/pipeline.yml"),
     "GITOPS_TOKEN": (f"{_AQUI}/deploy.yml", f"{_AQUI}/pipeline.yml"),
+    # NPM_TOKEN nao passa por esta esteira: quem publica no npm tem workflow
+    # proprio (o `jdi-cli` tem `npm-publish.yml`). Entao o padrao aqui nao pode
+    # ser o caminho da esteira — e a REFERENCIA AO PROPRIO SECRET, que e o
+    # criterio mais honesto que existe: se um workflow le `secrets.NPM_TOKEN`,
+    # aquele repositorio precisa dele. Sem falso positivo possivel.
+    "NPM_TOKEN": ("secrets.NPM_TOKEN", "NODE_AUTH_TOKEN"),
+}
+
+# Secrets que se SUBSTITUEM. O `deploy.yml` aceita chave SSH ou token
+# fine-grained e usa o que encontrar; ter os dois nao ajuda em nada, e exigir
+# os dois e pedir um segredo a mais para vazar e para rotacionar.
+#
+# Sem esta tabela o `--conferir` acusava `demo-python` de estar sem
+# GITOPS_TOKEN — ele tem a chave SSH, que basta. Um relatorio que aponta
+# problema onde nao ha e um relatorio que se aprende a ignorar, e ai ele deixa
+# de servir para o caso em que o problema e real.
+ALTERNATIVAS = {
+    "GITOPS_SSH_KEY": ("GITOPS_TOKEN",),
+    "GITOPS_TOKEN": ("GITOPS_SSH_KEY",),
 }
 
 
@@ -173,7 +203,141 @@ def valida_sonar(valor: str) -> str | None:
         return None
 
 
-VALIDADORES = {"SONAR_TOKEN": valida_sonar}
+def valida_npm(valor: str) -> str | None:
+    """None se o token presta; a razao, se nao presta.
+
+    `/-/whoami` so responde quem sou eu — nao publica, nao lista pacote, nao
+    depende de o pacote existir. Mesmo criterio do validador do SonarCloud:
+    isolar a autenticacao e mais nada.
+
+    Vale especialmente aqui porque token do npm expira. Um token vencido grava
+    sem reclamar e so aparece no dia da publicacao, com um 401 no meio do
+    release — que e o pior momento para descobrir.
+    """
+    req = urllib.request.Request(
+        "https://registry.npmjs.org/-/whoami",
+        headers={"Authorization": f"Bearer {valor}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            quem = json.load(r)
+        return None if quem.get("username") else "resposta sem username"
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return f"HTTP {e.code} — o npm recusou este token (vencido, revogado ou incompleto)"
+        return f"HTTP {e.code} — o npm nao aceitou a conferencia"
+    except Exception as e:  # noqa: BLE001 - rede, DNS, TLS: tudo aqui e inconclusivo
+        print(f"  aviso: nao deu para validar ({e}); seguindo sem conferir.")
+        return None
+
+
+VALIDADORES = {"SONAR_TOKEN": valida_sonar, "NPM_TOKEN": valida_npm}
+
+
+def secrets_do_repo(dono: str, repo: str) -> set[str] | None:
+    """Nomes dos secrets ja gravados, ou None se nao deu para olhar.
+
+    `gh secret list` devolve so os NOMES — valor de secret nao volta nem para
+    quem o gravou, e e assim que tem de ser. Para conferencia, nome basta: o
+    que se quer saber e se ele existe.
+
+    None e diferente de conjunto vazio: sem permissao de admin no repositorio a
+    listagem falha, e tratar isso como "nao tem nenhum" faria o relatorio
+    mandar gravar secret onde talvez ja exista.
+    """
+    r = subprocess.run(
+        ["gh", "secret", "list", "--repo", f"{dono}/{repo}", "--json", "name"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if r.returncode != 0:
+        return None
+    try:
+        return {s["name"] for s in json.loads(r.stdout or "[]")}
+    except json.JSONDecodeError:
+        return None
+
+
+def confere(dono: str, secrets: list[str]) -> int:
+    """Diz quem consome cada secret e se ele ja esta la. Nao grava nada.
+
+    POR QUE EXISTE. Ate 2026-09-16 a unica forma de descobrir que um secret
+    faltava era a esteira reprovar. Aconteceu com o `basalto`: ele nasceu sem
+    SONAR_TOKEN e sem GITOPS_SSH_KEY, e a falta so apareceu num job vermelho
+    depois de a esteira inteira rodar. A pergunta "qual repositorio esta sem
+    qual secret?" nao tinha resposta a nao ser abrindo a tela de cada um.
+
+    Sai com 1 quando falta alguma coisa, para servir de passo de CI ou de
+    tarefa agendada.
+    """
+    repos = repositorios(dono)
+    faltando: list[tuple[str, str]] = []
+    sem_permissao: set[str] = set()
+    # Uma listagem de secrets por repositorio, e nao uma por secret: a chamada
+    # e a mesma e o repositorio nao muda no meio da execucao.
+    cache: dict[str, set[str] | None] = {}
+
+    for secret in secrets:
+        padroes = PADROES.get(secret)
+        if not padroes:
+            print(f"\n{secret}: fora de PADROES, nao da para saber quem consome. Pulando.")
+            continue
+
+        print(f"\n{secret}")
+        algum = False
+        for repo in repos:
+            nome = repo["name"]
+            if nome == PROPRIO:
+                continue
+            if not consome(dono, nome, padroes):
+                continue
+            algum = True
+            if nome not in cache:
+                cache[nome] = secrets_do_repo(dono, nome)
+            existentes = cache[nome]
+            if existentes is None:
+                sem_permissao.add(nome)
+                print(f"  ?       {nome}  (sem permissao para listar os secrets)")
+            elif secret in existentes:
+                print(f"  ok      {nome}")
+            elif substituto := next(
+                (a for a in ALTERNATIVAS.get(secret, ()) if a in existentes), None
+            ):
+                print(f"  ok      {nome}  (por {substituto})")
+            else:
+                faltando.append((nome, secret))
+                print(f"  FALTA   {nome}")
+        if not algum:
+            print("  (nenhum repositorio consome este secret)")
+
+    print()
+    if sem_permissao:
+        quais = ", ".join(sorted(sem_permissao))
+        print(f"{len(sem_permissao)} repositorio(s) nao deram para conferir: {quais}")
+    if not faltando:
+        print("Nada faltando.")
+        return 0
+
+    # `GITOPS_SSH_KEY` e `GITOPS_TOKEN` faltando no mesmo repositorio sao UMA
+    # exigencia, nao duas: basta gravar um deles. Listar os dois faria a conta
+    # parecer maior do que o trabalho e.
+    vistos: set[tuple[str, str]] = set()
+    linhas: list[str] = []
+    for nome, secret in faltando:
+        alternativas = ALTERNATIVAS.get(secret, ())
+        chave = (nome, min([secret, *alternativas]))
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+        sufixo = f" (ou {' ou '.join(alternativas)})" if alternativas else ""
+        linhas.append(f"  {nome}: {secret}{sufixo}")
+
+    print(f"{len(linhas)} exigencia(s) nao atendida(s):")
+    for linha in linhas:
+        print(linha)
+    print("\nPara gravar:  python bin/semear_secret.py --aplicar --secret <NOME>")
+    return 1
 
 
 def main() -> int:
@@ -181,7 +345,29 @@ def main() -> int:
     grupo = ap.add_mutually_exclusive_group(required=True)
     grupo.add_argument("--listar", action="store_true", help="so mostra, nao grava")
     grupo.add_argument("--aplicar", action="store_true")
-    ap.add_argument("--secret", default="SONAR_TOKEN")
+    grupo.add_argument(
+        "--conferir",
+        action="store_true",
+        help="diz quem consome cada secret e se ele ja esta la. Nao grava. Sai 1 se faltar algum.",
+    )
+    ap.add_argument(
+        "--secret",
+        action="append",
+        help=(
+            "nome do secret; repetivel. Sem isto: SONAR_TOKEN em --listar e "
+            "--aplicar, e TODOS os de PADROES em --conferir."
+        ),
+    )
+    ap.add_argument(
+        "--de-diretorio",
+        type=Path,
+        help=(
+            "le o valor de cada secret de <DIR>/<NOME_DO_SECRET>, o que permite "
+            "gravar varios de uma vez. Use um diretorio FORA de qualquer "
+            "repositorio — um arquivo de segredo dentro da arvore de trabalho "
+            "acaba commitado."
+        ),
+    )
     ap.add_argument("--dono", default="slipalison")
     ap.add_argument(
         "--padrao",
@@ -199,15 +385,46 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    if not NOME_DE_SECRET.match(args.secret):
-        raise SystemExit(f"--secret precisa ser MAIUSCULAS_E_SUBLINHADO; recebi {args.secret!r}")
     if not NOME_DE_CONTA.match(args.dono):
         raise SystemExit(f"--dono nao parece uma conta do GitHub: {args.dono!r}")
 
-    padroes = tuple(args.padrao) if args.padrao else PADROES.get(args.secret)
+    # Sem `--secret`: conferir olha TUDO o que a esteira conhece, porque a
+    # pergunta que ele responde e "o que esta faltando em algum lugar?"; listar
+    # e aplicar continuam com o padrao de um so, para nao gravar em lote por
+    # engano quem so queria um.
+    secrets = args.secret or (list(PADROES) if args.conferir else ["SONAR_TOKEN"])
+    for s in secrets:
+        if not NOME_DE_SECRET.match(s):
+            raise SystemExit(f"--secret precisa ser MAIUSCULAS_E_SUBLINHADO; recebi {s!r}")
+
+    if args.conferir:
+        return confere(args.dono, secrets)
+
+    if len(secrets) > 1 and not args.de_diretorio:
+        raise SystemExit(
+            "mais de um --secret exige --de-diretorio: o valor de cada um vem de "
+            "<DIR>/<NOME_DO_SECRET>. Digitar varios seguidos no terminal e onde "
+            "se cola o token errado no campo certo."
+        )
+    if args.padrao and len(secrets) > 1:
+        raise SystemExit(
+            "--padrao vale para um --secret so; com varios, cada um usa o seu de PADROES."
+        )
+
+    total_falhas = 0
+    for secret in secrets:
+        if len(secrets) > 1:
+            print(f"\n{'=' * 60}\n{secret}\n{'=' * 60}")
+        total_falhas += aplica_um(args, secret)
+    return 1 if total_falhas else 0
+
+
+def aplica_um(args, secret: str) -> int:
+    """Descobre quem consome `secret`, le o valor e grava. 0 se deu tudo certo."""
+    padroes = tuple(args.padrao) if args.padrao else PADROES.get(secret)
     if not padroes:
         raise SystemExit(
-            f"`{args.secret}` nao esta em PADROES. Diga o que procurar com --padrao, "
+            f"`{secret}` nao esta em PADROES. Diga o que procurar com --padrao, "
             "para o script nao gravar o segredo em repositorio que nao o usa."
         )
 
@@ -227,27 +444,37 @@ def main() -> int:
         print("\nNenhum repositorio usa a esteira. Nada a fazer.")
         return 0
 
-    print(f"\n{len(alvos)} repositorio(s) receberiam `{args.secret}`.")
+    print(f"\n{len(alvos)} repositorio(s) receberiam `{secret}`.")
     if args.listar:
         print("Modo --listar: nada foi gravado.")
         return 0
 
-    if args.arquivo:
+    if args.de_diretorio:
+        # Um arquivo por secret, com o NOME do secret como nome do arquivo. E o
+        # que permite gravar varios numa passada sem ninguem digitar nada — e
+        # sem valor nenhum em argv.
+        caminho = args.de_diretorio / secret
+        if not caminho.is_file():
+            print(f"::error::{caminho} nao existe; `{secret}` nao foi gravado.")
+            return 1
+        valor = caminho.read_text(encoding="utf-8").strip()
+        print(f"Valor lido de {caminho}.")
+    elif args.arquivo:
         # strip no fim: um editor quase sempre deixa uma quebra de linha no
         # final do arquivo, e um token com quebra de linha colada atras e um
         # token diferente — que o SonarCloud recusa sem explicar por que.
         valor = args.arquivo.read_text(encoding="utf-8").strip()
         print(f"Valor lido de {args.arquivo}.")
-    elif os.environ.get(args.secret):
-        valor = os.environ[args.secret]
-        print(f"Valor de `{args.secret}` lido do ambiente.")
+    elif os.environ.get(secret):
+        valor = os.environ[secret]
+        print(f"Valor de `{secret}` lido do ambiente.")
     elif not sys.stdin.isatty():
         valor = sys.stdin.read().strip()
         print("Valor lido da entrada padrao.")
     else:
         # getpass, e nao input(): sem eco e sem historico de shell. E nunca como
         # argumento — argv e publico na maquina.
-        valor = getpass.getpass(f"Valor de {args.secret} (nao aparece na tela): ")
+        valor = getpass.getpass(f"Valor de {secret} (nao aparece na tela): ")
     valor = valor.strip()
     if not valor:
         print("::error::valor vazio; nada foi gravado.")
@@ -259,7 +486,7 @@ def main() -> int:
     # SonarCloud que mandava "conferir o token".
     print(f"Impressao digital: {impressao(valor)}")
 
-    validador = VALIDADORES.get(args.secret)
+    validador = VALIDADORES.get(secret)
     if validador:
         print("Conferindo o valor na origem antes de gravar...")
         problema = validador(valor)
@@ -276,7 +503,7 @@ def main() -> int:
     falhas = 0
     for nome, _, _ in alvos:
         r = subprocess.run(
-            ["gh", "secret", "set", args.secret, "--repo", f"{args.dono}/{nome}"],
+            ["gh", "secret", "set", secret, "--repo", f"{args.dono}/{nome}"],
             input=valor,
             capture_output=True,
             text=True,
