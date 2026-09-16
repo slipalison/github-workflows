@@ -212,7 +212,20 @@ SONAR_TOKEN=... python bin/semear_secret.py --aplicar --secret SONAR_TOKEN
 # Vários numa passada: um arquivo por secret, com o NOME do secret como nome
 # do arquivo, num diretório FORA de qualquer repositório.
 python bin/semear_secret.py --aplicar     --secret SONAR_TOKEN --secret NPM_TOKEN     --de-diretorio ~/.config/segredos-github
+
+# TODOS os repositórios da conta, e não só os que usam o secret.
+python bin/semear_secret.py --listar  --todos --secret NPM_TOKEN   # a lista, sem gravar
+NPM_TOKEN=... python bin/semear_secret.py --aplicar --todos --secret NPM_TOKEN
 ```
+
+**`--todos` grava onde o secret não é usado, e isso é escolha de quem roda.**
+O padrão continua sendo a descoberta, porque uma cópia a mais é mais um lugar
+de onde o segredo pode vazar e mais um para lembrar de trocar na rotação — com
+82 repositórios, são 82 cópias. O modo existe para quem prefere gravar uma vez
+em tudo a voltar aqui a cada repositório novo. Ele mostra a conta na tela e
+**pede confirmação digitada**; `--listar --todos` mostra a lista antes, e
+`--sim` pula a pergunta em script. Com `--todos` o secret também não precisa
+estar em `PADROES` — não há o que descobrir.
 
 Os secrets que ele conhece, e como cada um encontra o próprio público:
 

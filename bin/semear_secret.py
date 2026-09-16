@@ -259,7 +259,7 @@ def secrets_do_repo(dono: str, repo: str) -> set[str] | None:
         return None
 
 
-def confere(dono: str, secrets: list[str]) -> int:
+def confere(dono: str, secrets: list[str], todos: bool = False) -> int:
     """Diz quem consome cada secret e se ele ja esta la. Nao grava nada.
 
     POR QUE EXISTE. Ate 2026-09-16 a unica forma de descobrir que um secret
@@ -368,6 +368,20 @@ def main() -> int:
             "acaba commitado."
         ),
     )
+    ap.add_argument(
+        "--todos",
+        action="store_true",
+        help=(
+            "ignora a descoberta e alcanca TODOS os repositorios nao arquivados "
+            "da conta. Grava tambem onde o secret nao e usado — mais copias "
+            "para vazar e para rotacionar. Pede confirmacao."
+        ),
+    )
+    ap.add_argument(
+        "--sim",
+        action="store_true",
+        help="responde `sim` a confirmacao do --todos. Para uso em script.",
+    )
     ap.add_argument("--dono", default="slipalison")
     ap.add_argument(
         "--padrao",
@@ -398,7 +412,7 @@ def main() -> int:
             raise SystemExit(f"--secret precisa ser MAIUSCULAS_E_SUBLINHADO; recebi {s!r}")
 
     if args.conferir:
-        return confere(args.dono, secrets)
+        return confere(args.dono, secrets, todos=args.todos)
 
     if len(secrets) > 1 and not args.de_diretorio:
         raise SystemExit(
@@ -411,6 +425,23 @@ def main() -> int:
             "--padrao vale para um --secret so; com varios, cada um usa o seu de PADROES."
         )
 
+    # So `--aplicar` pede confirmacao. `--listar --todos` existe justamente
+    # para ver os 82 nomes ANTES de decidir, e perguntar ali seria pedir
+    # autorizacao para nao fazer nada.
+    if args.aplicar and args.todos and not args.sim:
+        quantos = len(repositorios(args.dono))
+        print(
+            f"--todos vai gravar {', '.join(secrets)} em {quantos} repositorio(s) de "
+            f"{args.dono}, inclusive nos que nao usam o secret."
+        )
+        print(
+            "Cada copia e mais um lugar de onde o segredo pode vazar e mais um "
+            "para lembrar de trocar na proxima rotacao."
+        )
+        if not confirma("Confirma?"):
+            print("Nada foi gravado.")
+            return 1
+
     total_falhas = 0
     for secret in secrets:
         if len(secrets) > 1:
@@ -419,26 +450,59 @@ def main() -> int:
     return 1 if total_falhas else 0
 
 
-def aplica_um(args, secret: str) -> int:
-    """Descobre quem consome `secret`, le o valor e grava. 0 se deu tudo certo."""
-    padroes = tuple(args.padrao) if args.padrao else PADROES.get(secret)
-    if not padroes:
-        raise SystemExit(
-            f"`{secret}` nao esta em PADROES. Diga o que procurar com --padrao, "
-            "para o script nao gravar o segredo em repositorio que nao o usa."
-        )
+def todos_os_alvos(dono: str) -> list[tuple[str, str, str]]:
+    """Todo repositorio nao arquivado da conta, sem olhar workflow nenhum.
 
-    print(f"Procurando {' ou '.join(padroes)} em {args.dono}/* ...")
-    alvos: list[tuple[str, str, str]] = []
-    for repo in repositorios(args.dono):
-        # O repositorio dos templates se auto-referencia; ele DEFINE a esteira,
-        # nao a consome.
-        if repo["name"] == PROPRIO:
-            continue
-        onde = consome(args.dono, repo["name"], padroes)
-        if onde:
-            alvos.append((repo["name"], repo["visibility"], onde))
-            print(f"  {repo['visibility']:<8} {repo['name']}  ({onde})")
+    E o modo `--todos`. O CUSTO esta assumido e vale escrever: um segredo
+    gravado onde ninguem o usa nao quebra nada hoje, e cria mais uma copia para
+    vazar e mais um lugar para lembrar de rotacionar quando o token trocar. Com
+    82 repositorios, e 82 copias.
+
+    A troca e deliberada: quem usa este modo prefere gravar uma vez em tudo a
+    voltar aqui a cada repositorio novo que adota a esteira.
+    """
+    alvos = [(r["name"], r["visibility"], "--todos") for r in repositorios(dono)]
+    print(f"Modo --todos: {len(alvos)} repositorio(s) nao arquivado(s) de {dono}.")
+    return alvos
+
+
+def confirma(pergunta: str) -> bool:
+    """True quando a pessoa digitou `sim`. Fora de terminal, recusa.
+
+    Sem terminal nao ha como perguntar, e seguir em frente seria gravar em
+    dezenas de repositorios porque alguem canalizou a saida por engano.
+    `--sim` e a forma de dizer que sabe o que esta fazendo.
+    """
+    if not sys.stdin.isatty():
+        print("::error::sem terminal para confirmar. Use --sim se for intencional.")
+        return False
+    return input(f"{pergunta} [digite `sim`]: ").strip().lower() == "sim"
+
+
+def aplica_um(args, secret: str) -> int:
+    """Escolhe os repositorios, le o valor e grava. 0 se deu tudo certo."""
+    if args.todos:
+        alvos = todos_os_alvos(args.dono)
+    else:
+        padroes = tuple(args.padrao) if args.padrao else PADROES.get(secret)
+        if not padroes:
+            raise SystemExit(
+                f"`{secret}` nao esta em PADROES. Diga o que procurar com --padrao, "
+                "use --todos, para o script nao gravar o segredo em repositorio "
+                "que nao o usa."
+            )
+
+        print(f"Procurando {' ou '.join(padroes)} em {args.dono}/* ...")
+        alvos = []
+        for repo in repositorios(args.dono):
+            # O repositorio dos templates se auto-referencia; ele DEFINE a
+            # esteira, nao a consome.
+            if repo["name"] == PROPRIO:
+                continue
+            onde = consome(args.dono, repo["name"], padroes)
+            if onde:
+                alvos.append((repo["name"], repo["visibility"], onde))
+                print(f"  {repo['visibility']:<8} {repo['name']}  ({onde})")
 
     if not alvos:
         print("\nNenhum repositorio usa a esteira. Nada a fazer.")
