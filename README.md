@@ -192,6 +192,36 @@ O que **não** se faz é deixar um repositório privado sem análise e fingir qu
 portão existe. Para isso há `sonar_exigir_token: false`, que é explícito, aparece
 no diff, e emite `::warning::` em todo run.
 
+### Preparar um repositório do zero, num comando
+
+[`bin/preparar_repositorios.py`](bin/preparar_repositorios.py) faz a sequência
+inteira: gera a chave `ed25519`, sobe como **deploy key com escrita** no
+repositório de GitOps, grava `GITOPS_SSH_KEY` e `SONAR_TOKEN`, e roda a
+conferência no fim.
+
+```bash
+python bin/preparar_repositorios.py --tudo                       # gera a chave e grava tudo
+python bin/preparar_repositorios.py --secrets --chave ~/.ssh/gitops_ci   # a chave já existe
+python bin/preparar_repositorios.py --chave-nova                 # só a deploy key
+python bin/preparar_repositorios.py --conferir                   # só o relatório
+```
+
+**Ele não reimplementa o semeador** — chama o `semear_secret.py` como
+subprocesso. Descoberta, impressão digital, validação na origem e a regra de o
+valor ir por stdin continuam morando num lugar só.
+
+Nasceu de dois tropeços reais, os dois na fronteira entre bash e PowerShell:
+`chmod`, que não existe no Windows, e `-N ""`, que o PowerShell entrega ao
+`ssh-keygen` como uma **passphrase literal de dois caracteres** — o que produz
+uma chave que o Actions não consegue usar, falhando lá na frente com um erro que
+não diz isso. Aqui os argumentos vão por lista, sem shell no meio, e o problema
+deixa de existir nos dois sistemas.
+
+O token continua **nunca vindo por argumento**: variável de ambiente, arquivo,
+ou digitado sem eco. `argv` é legível por qualquer processo da máquina. Os
+arquivos temporários ficam num diretório que some no `finally`, mesmo quando
+algo falha no meio.
+
 ### O secret em vários repositórios de uma vez
 
 Não existe secret de Actions global para conta pessoal — o `gh` é explícito:
