@@ -17,7 +17,7 @@ description: >-
 
 inputs:
   linguagem:
-    description: "dotnet | python | node | go | nenhuma"
+    description: "dotnet | python | node | go | rust | nenhuma"
     required: false
     default: "nenhuma"
   versao:
@@ -139,6 +139,50 @@ runs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ inputs.versao || '1.24' }}
+
+    # Rust NAO ganha action de terceiro. A imagem do runner ja traz o toolchain
+    # stable com cargo, e `rustup` esta no PATH — trazer uma action so para
+    # instalar o que ja existe custaria mais uma dependencia fixada por SHA, com
+    # acesso ao token do run, para fazer nada. O que falta e componente
+    # (rustfmt, clippy, llvm-tools-preview) e, quando pedido, uma versao
+    # especifica.
+    #
+    # A versao entra por `env`, e nao interpolada dentro do script: um valor
+    # vindo do JSON de `componentes` viraria comando se caisse direto no `run`.
+    - name: Rust
+      if: inputs.linguagem == 'rust'
+      shell: bash
+      env:
+        VERSAO_RUST: ${{ inputs.versao }}
+      run: |
+        set -euo pipefail
+        if [ -n "$VERSAO_RUST" ]; then
+          rustup toolchain install "$VERSAO_RUST" --profile minimal \
+            --component rustfmt,clippy,llvm-tools-preview
+          rustup default "$VERSAO_RUST"
+        else
+          rustup component add rustfmt clippy llvm-tools-preview
+        fi
+        rustc --version
+        cargo --version
+
+    # Registro e git do Cargo. Sao globais (~/.cargo) e independem de onde o
+    # crate mora — por isso ficam aqui. O `target/`, que depende do caminho do
+    # componente, e cacheado em qualidade.yml, onde esse caminho e conhecido.
+    #
+    # `registry/index` e `registry/cache`, e nao `~/.cargo` inteiro: o diretorio
+    # completo carrega os binarios instalados, que engordam o cache sem acelerar
+    # compilacao nenhuma.
+    - name: Cache do Cargo
+      if: inputs.linguagem == 'rust'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+        key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: cargo-${{ runner.os }}-
 
     # O `cache: true` do setup-dotnet exige packages.lock.json, que nem todo
     # projeto tem — e sem o arquivo ele falha do mesmo jeito que o do Python.

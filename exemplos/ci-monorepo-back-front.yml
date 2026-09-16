@@ -1,0 +1,175 @@
+# Monorepo com backend Rust e frontend React, UMA imagem no fim.
+#
+# Copiar para .github/workflows/ci.yml no repositorio da aplicacao e trocar os
+# nomes. E a forma do `basalto`: `backend/` compila em Rust, `frontend/` compila
+# em Vite, e o binario do backend serve a API e os estaticos do PWA — um
+# container, e nao dois.
+#
+# O QUE MUDA NUM REPOSITORIO COM DOIS MUNDOS
+# ------------------------------------------
+# Nada na orquestracao. `componentes` e um array: dois objetos viram dois jobs
+# paralelos, cada um com o lint, o teste e o piso de cobertura da SUA
+# linguagem. O erro classico aqui — e o que o `simulator-ccb` fazia — e criar
+# `backend-build` e `backend-test` ligados por `needs` sem artefato no meio: o
+# segundo refaz o build que o primeiro jogou fora, e o `needs` so serializa.
+#
+# O que de fato precisa de cuidado num monorepo e o Sonar, que e UM projeto
+# olhando DUAS arvores de fonte e DOIS formatos de cobertura. Ver `sonar_*`
+# la embaixo.
+#
+# A IMAGEM E UMA SO
+# -----------------
+# `imagem` aponta para um Dockerfile multi-stage na raiz que constroi os dois:
+#
+#   FROM node:24-alpine AS front
+#   WORKDIR /w
+#   COPY frontend/package*.json ./
+#   RUN npm ci --ignore-scripts
+#   COPY frontend/ ./
+#   RUN npm run build                      # -> /w/dist
+#
+#   FROM rust:1.98-slim AS back
+#   WORKDIR /w
+#   COPY backend/ ./
+#   RUN cargo build --release --locked     # -> /w/target/release/app
+#
+#   FROM gcr.io/distroless/cc-debian12:nonroot
+#   COPY --from=back  /w/target/release/app /app
+#   COPY --from=front /w/dist               /estaticos
+#   USER nonroot
+#   EXPOSE 8080
+#   ENTRYPOINT ["/app"]
+#
+# Se um dia forem duas imagens (backend e frontend em pods separados), sao dois
+# `uses:` deste pipeline com `imagem` e `app` diferentes — nao um pipeline com
+# dois builds.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancela o run anterior da MESMA branch quando chega commit novo. Sem isto,
+# tres pushes seguidos rodam tres esteiras e a primeira, ja obsoleta, ainda
+# pode escrever no GitOps.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  esteira:
+    # OBRIGATORIO declarar aqui. Um workflow reutilizavel nunca recebe mais
+    # permissao do que quem o chama concede, e o padrao da conta e leitura. Sem
+    # `packages: write` o run morre em startup_failure com "requesting
+    # 'packages: write', but is only allowed 'packages: read'" — que nao aparece
+    # no log de passo nenhum, so na tela do run.
+    permissions:
+      contents: write        # tag e release da versao (job `lancar`, so na main)
+      packages: write        # imagem e alias :<versao>
+      security-events: write # SARIF das varreduras
+      actions: read
+    uses: slipalison/github-workflows/.github/workflows/pipeline.yml@main
+    with:
+      # ------------------------------------------------------- qualidade ----
+      # Dois componentes, dois jobs em paralelo. `caminho` e o diretorio de
+      # trabalho de cada um — sem ele os dois rodariam na raiz e nenhum acharia
+      # o proprio manifesto.
+      #
+      # Rust: `cargo fmt --check`, `cargo clippy -D warnings` e `cargo llvm-cov`
+      #       (que ja roda os testes — nao ha `cargo test` antes, seria a mesma
+      #       suite duas vezes). A cobertura sai em LCOV.
+      # Node: `npm ci --ignore-scripts`, `npm run build`, `npm test`.
+      #       O `--ignore-scripts` e o padrao de proposito: script de instalacao
+      #       roda antes de qualquer teste, com o que o job enxerga, e e o vetor
+      #       classico de pacote npm comprometido. `scripts_de_instalacao: true`
+      #       devolve o comportamento antigo, para pacote nativo que compile.
+      componentes: |
+        [
+          {"nome":"backend","linguagem":"rust","versao":"1.98","caminho":"backend","cobertura":80},
+          {"nome":"frontend","linguagem":"node","versao":"24","caminho":"frontend","cobertura":80}
+        ]
+
+      # ---------------------------------------------------------- imagem ----
+      imagem: ghcr.io/slipalison/meu-monorepo
+      # Contexto na RAIZ, porque o Dockerfile copia de `backend/` e de
+      # `frontend/`. Contexto em `backend/` nao enxerga o irmao.
+      contexto_build: "."
+      dockerfile: Dockerfile
+      # A imagem so e publicada depois do Trivy. CRITICAL bloqueia; HIGH aparece
+      # no painel e nao barra — trocar para "CRITICAL,HIGH" quando a base de
+      # imagem estiver limpa o suficiente para isso nao virar ruido.
+      severidade_bloqueante: CRITICAL
+
+      # --------------------------------------------------------- seguranca --
+      # CodeQL entende Rust desde outubro/2025 (GA, e sem build). Mas o `analyze`
+      # publica na aba Security e NAO tem modo so-relatorio: num repositorio
+      # PRIVADO sem GitHub Advanced Security ele falha com 403 depois de ter
+      # rodado a analise inteira. Em repositorio privado sem GHAS deixe vazio —
+      # o Semgrep ja roda nas sete varreduras e o resultado aparece no painel.
+      #
+      # linguagens_codeql: '["rust","javascript-typescript"]'   # repo publico ou com GHAS
+      linguagens_codeql: '[]'
+      # Dockerfile e o chart/values do deploy entram na varredura de IaC.
+      caminho_iac: "."
+
+      # -------------------------------------------------------------- sonar --
+      # AQUI e onde monorepo da trabalho. Um projeto Sonar, duas arvores de
+      # fonte, dois formatos de cobertura:
+      #
+      #   sonar.sources / sonar.tests  — as duas arvores, separadas por virgula
+      #   sonar.rust.lcov.reportPaths       — cobertura do Rust
+      #   sonar.javascript.lcov.reportPaths — cobertura do front
+      #
+      # O analisador de Rust do Sonar roda o Clippy sozinho
+      # (`sonar.rust.clippy.enabled`, ligado por padrao) e precisa saber onde
+      # estao os Cargo.toml (`sonar.rust.cargo.manifestPaths`).
+      #
+      # CUSTO ACEITO, e vale saber: o job `sonar` roda os testes DE NOVO —
+      # `qualidade` e `sonar` correm em paralelo de proposito, e um job nao le o
+      # artefato do outro sem `needs`, que serializaria a esteira inteira para
+      # todo mundo. Sao minutos de runner a mais, nao relogio. Se um dia isso
+      # apertar, a correcao e `sonar` consumir o artefato `resultados-*` do
+      # `qualidade` — e pagar a espera.
+      sonar_projeto: slipalison_meu-monorepo
+      sonar_modo: generico
+      # `linguagem: rust` faz a action `preparar` instalar rustfmt, clippy e
+      # llvm-tools no job do Sonar; o Node ja vem na imagem do runner.
+      sonar_linguagem: rust
+      sonar_comando_testes: >-
+        curl --proto '=https' --tlsv1.2 -fsSL
+        https://github.com/taiki-e/cargo-llvm-cov/releases/download/v0.9.1/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz
+        | tar xzf - -C "$HOME/.cargo/bin" &&
+        cargo llvm-cov --all-features --workspace --manifest-path backend/Cargo.toml
+        --lcov --output-path backend/resultados/lcov.info &&
+        npm ci --ignore-scripts --prefix frontend &&
+        npm test --prefix frontend
+      sonar_parametros: |
+        sonar.sources=backend/src,frontend/src
+        sonar.tests=backend/tests,frontend/src/__tests__
+        sonar.rust.cargo.manifestPaths=backend/Cargo.toml
+        sonar.rust.lcov.reportPaths=backend/resultados/lcov.info
+        sonar.javascript.lcov.reportPaths=frontend/coverage/lcov.info
+        sonar.exclusions=frontend/dist/**,backend/target/**
+
+      # -------------------------------------------------------------- versao --
+      # A versao sai das mensagens de commit (feat -> minor, feat! -> major, o
+      # resto -> patch). Commit fora do Conventional Commits REPROVA a esteira;
+      # e o padrao, de proposito, e `commits_sem_tipo: patch` afrouxa.
+      versionar: true
+      versao_inicial: "0.1.0"
+
+      # ------------------------------------------------------------ publicar --
+      # `app` e o nome do diretorio em homelab-gitops/apps/. Vazio desliga o
+      # deploy — util enquanto o values.yaml ainda nao existe la.
+      #
+      # ORDEM QUE JA CUSTOU CARO: o values.yaml no GitOps so pode entrar DEPOIS
+      # do primeiro build. Um `tag:` apontando para imagem inexistente faz o
+      # ReplicaSet estavel nascer em ImagePullBackOff, e como o Rollout so
+      # promove sobre um estavel saudavel, a primeira imagem de verdade fica
+      # presa em Degraded ate um `promote --full` na mao.
+      app: meu-monorepo
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      GITOPS_SSH_KEY: ${{ secrets.GITOPS_SSH_KEY }}
