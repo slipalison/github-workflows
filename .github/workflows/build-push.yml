@@ -85,6 +85,11 @@ jobs:
           # sha-<7> e reproduzivel e diz de onde veio. `latest` nao diz nada, nao
           # permite rollback, e o Kyverno recusa no cluster.
           echo "tag=sha-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+          # O SHA completo sai do MESMO HEAD que gerou a tag, e nao de
+          # `github.sha`: num pull_request o checkout aponta para o merge
+          # commit, e os dois divergiriam — a imagem diria ter vindo de um
+          # commit que nao e o que a construiu.
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           # Virgula em `platforms` significa multi-plataforma, e `load: true` nao
           # aceita mais de uma — e o que decide entre varrer antes ou depois de
           # publicar.
@@ -112,6 +117,13 @@ jobs:
           load: true
           push: false
           tags: ${{ inputs.image }}:${{ steps.meta.outputs.tag }}
+          # Passado SEMPRE. Um Dockerfile que nao declara `ARG GIT_SHA` so
+          # recebe o aviso "one or more build-args were not consumed" — nao
+          # falha. Quem declara ganha de graca poder dizer, em tempo de
+          # execucao, de qual commit veio o binario que esta no ar; sem isso um
+          # endpoint de versao informa o que foi pedido, e nao o que rodou.
+          build-args: |
+            GIT_SHA=${{ steps.meta.outputs.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
@@ -127,6 +139,8 @@ jobs:
           platforms: ${{ inputs.platforms }}
           push: true
           tags: ${{ inputs.image }}:${{ steps.meta.outputs.tag }}
+          build-args: |
+            GIT_SHA=${{ steps.meta.outputs.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
@@ -208,6 +222,12 @@ jobs:
           platforms: ${{ inputs.platforms }}
           push: true
           tags: ${{ inputs.image }}:${{ steps.meta.outputs.tag }}
+          # IDENTICO ao passo de construcao, e nao por simetria: um build-arg
+          # diferente muda o layer, erra o cache e produz uma imagem OUTRA. O
+          # Trivy teria varrido uma e o GHCR receberia a outra — o portao
+          # continuaria verde falando de uma imagem que ninguem publicou.
+          build-args: |
+            GIT_SHA=${{ steps.meta.outputs.sha }}
           # Mesmo cache do passo de construcao: nao ha recompilacao, so o envio
           # dos layers.
           cache-from: type=gha
