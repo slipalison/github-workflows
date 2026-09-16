@@ -130,10 +130,10 @@ ALTERNATIVAS = {
 }
 
 
-def gh(*args: str, entrada: str | None = None, checar: bool = True) -> str:
-    r = subprocess.run(
-        ["gh", *args], capture_output=True, text=True, input=entrada, encoding="utf-8"
-    )
+def gh(*args: str, checar: bool = True) -> str:
+    # Sem `input=`: valor de secret NAO passa por aqui. Vai por `para_stdin`,
+    # que entrega bytes — o porque esta la.
+    r = subprocess.run(["gh", *args], capture_output=True, text=True, encoding="utf-8")
     if checar and r.returncode != 0:
         raise SystemExit(f"gh {' '.join(args)} falhou: {r.stderr.strip()}")
     return r.stdout
@@ -500,6 +500,31 @@ def confirma(pergunta: str) -> bool:
     return input(f"{pergunta} [digite `sim`]: ").strip().lower() == "sim"
 
 
+def para_stdin(valor: str) -> bytes:
+    r"""O valor exatamente como o `gh` deve receber, em bytes.
+
+    BYTES, E NAO `text=True`. No Windows, `subprocess.run(input=..., text=True)`
+    traduz cada \n para \r\n antes de entregar ao filho. Medido:
+
+        input="linha1\nlinha2\n", text=True  ->  b'linha1\r\nlinha2\r\n'
+
+    Um token de uma linha nao percebe. Uma chave privada OpenSSH, sim: ela
+    chega ao GitHub com CRLF no meio, o `gh secret set` guarda o que recebeu, e
+    o checkout do GitOps falha com `Permission denied (publickey)` — que manda
+    procurar permissao da deploy key, e nao o formato do valor. Custou um
+    deploy do Basalto em 2026-09-16.
+
+    A quebra de linha final tambem volta aqui. Ela foi tirada por um `.strip()`
+    que existe por um bom motivo (um token com quebra colada atras e outro
+    token), mas chave OpenSSH sem quebra final e chave malformada. So para
+    valor de mais de uma linha: um token continua saindo como veio.
+    """
+    limpo = valor.replace("\r\n", "\n")
+    if "\n" in limpo and not limpo.endswith("\n"):
+        limpo += "\n"
+    return limpo.encode("utf-8")
+
+
 def aplica_um(args, secret: str) -> int:
     """Escolhe os repositorios, le o valor e grava. 0 se deu tudo certo."""
     if args.todos:
@@ -586,19 +611,18 @@ def aplica_um(args, secret: str) -> int:
         print("  ok: a origem aceitou o valor.")
 
     falhas = 0
+    corpo = para_stdin(valor)
     for nome, _, _ in alvos:
         r = subprocess.run(
             ["gh", "secret", "set", secret, "--repo", f"{args.dono}/{nome}"],
-            input=valor,
+            input=corpo,
             capture_output=True,
-            text=True,
-            encoding="utf-8",
         )
         if r.returncode == 0:
             print(f"  ok    {nome}")
         else:
             falhas += 1
-            print(f"  FALHA {nome}: {r.stderr.strip()}")
+            print(f"  FALHA {nome}: {r.stderr.decode('utf-8', 'replace').strip()}")
 
     print(f"\n{len(alvos) - falhas} gravado(s), {falhas} falha(s).")
     if falhas:
