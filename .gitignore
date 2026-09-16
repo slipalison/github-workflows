@@ -1,0 +1,5 @@
+# Bytecode do Python. Entrou no indice em 2026-09-16, junto com um commit que
+# so mexia em bin/ — e um .pyc versionado e um arquivo que muda sozinho a cada
+# execucao, com a versao do interpretador colada no nome.
+__pycache__/
+*.py[cod]
