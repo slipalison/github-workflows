@@ -73,6 +73,25 @@ NOME_DE_SECRET = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 NOME_DE_CONTA = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
 NOME_DE_REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 
+
+def so_o_que_casa(padrao: re.Pattern[str], valor: str, queixa: str) -> str:
+    """Devolve o valor SO se ele casar inteiro com o padrao; senao, para aqui.
+
+    O retorno sai de `m.group(0)`, e nao do argumento. Sao a mesma string, mas
+    a diferenca importa duas vezes: quem le sabe que dali para baixo o valor ja
+    passou pelo crivo, e a analise estatica consegue seguir isso — antes ela
+    apontava injecao de argumento em `gh secret set`, porque a checagem ficava
+    num `if` que ela nao relacionava com o uso la embaixo.
+
+    Estes valores viram argumento de `gh`. Um `--secret` que comecasse com
+    tracos viraria uma OPCAO do `gh`, e nao o nome de um secret.
+    """
+    m = padrao.match(valor)
+    if m is None:
+        raise SystemExit(f"{queixa}; recebi {valor!r}")
+    return m.group(0)
+
+
 # O criterio nao pode ser "usa a esteira": e largo demais, e foi medido. Na
 # primeira execucao ele trouxe `homelab-gitops`, que so chama o helm-lint.yml, e
 # o proprio `github-workflows`, que se auto-referencia. Nenhum dos dois tem
@@ -399,17 +418,19 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    if not NOME_DE_CONTA.match(args.dono):
-        raise SystemExit(f"--dono nao parece uma conta do GitHub: {args.dono!r}")
+    dono = so_o_que_casa(NOME_DE_CONTA, args.dono, "--dono nao parece uma conta do GitHub")
+    args.dono = dono
 
     # Sem `--secret`: conferir olha TUDO o que a esteira conhece, porque a
     # pergunta que ele responde e "o que esta faltando em algum lugar?"; listar
     # e aplicar continuam com o padrao de um so, para nao gravar em lote por
     # engano quem so queria um.
-    secrets = args.secret or (list(PADROES) if args.conferir else ["SONAR_TOKEN"])
-    for s in secrets:
-        if not NOME_DE_SECRET.match(s):
-            raise SystemExit(f"--secret precisa ser MAIUSCULAS_E_SUBLINHADO; recebi {s!r}")
+    brutos = args.secret or (list(PADROES) if args.conferir else ["SONAR_TOKEN"])
+    secrets = [
+        so_o_que_casa(NOME_DE_SECRET, s, "--secret precisa ser MAIUSCULAS_E_SUBLINHADO")
+        for s in brutos
+    ]
+    args.secret = secrets
 
     if args.conferir:
         return confere(args.dono, secrets, todos=args.todos)

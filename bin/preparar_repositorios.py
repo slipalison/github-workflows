@@ -59,6 +59,20 @@ NOME_DE_CONTA = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
 REPO_COMPLETO = re.compile(r"^[A-Za-z0-9][\w.-]{0,99}/[A-Za-z0-9][\w.-]{0,99}$")
 
 
+def so_o_que_casa(padrao: re.Pattern[str], valor: str, queixa: str) -> str:
+    """Devolve o valor SO se ele casar inteiro com o padrao; senao, para aqui.
+
+    O retorno sai de `m.group(0)`, e nao do argumento. E a mesma string, mas
+    dali para baixo quem le — e a analise estatica — sabe que ela ja passou
+    pelo crivo. Estes valores viram argumento de `gh`: um `--dono` comecando
+    com tracos viraria uma OPCAO do `gh`, e nao o nome de uma conta.
+    """
+    m = padrao.match(valor)
+    if m is None:
+        raise SystemExit(f"::error::{queixa}; recebi {valor!r}")
+    return m.group(0)
+
+
 def roda(*args: str, entrada: str | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(args), input=entrada, capture_output=True, text=True, encoding="utf-8"
@@ -123,11 +137,18 @@ def chave_de_deploy(gitops_repo: str, destino: Path, titulo: str) -> Path:
 def le_segredo(nome: str, arquivo: Path | None) -> str:
     """Do arquivo, do ambiente, ou digitado sem eco. Nunca de `argv`."""
     if arquivo:
+        # `resolve` antes de perguntar se e arquivo: sem isso um link simbolico
+        # ou um `..` no meio do caminho passariam pela checagem e leriam outra
+        # coisa. E `is_file` recusa cedo o diretorio, que daria um
+        # IsADirectoryError sem dizer qual argumento estava errado.
+        caminho = arquivo.expanduser().resolve()
+        if not caminho.is_file():
+            raise SystemExit(f"::error::{caminho} nao e um arquivo.")
         # strip: editor quase sempre deixa uma quebra de linha no fim, e um
         # token com \\n colado atras e um token diferente — que a origem recusa
         # sem explicar por que.
-        valor = arquivo.read_text(encoding="utf-8").strip()
-        print(f"`{nome}` lido de {arquivo}.")
+        valor = caminho.read_text(encoding="utf-8").strip()
+        print(f"`{nome}` lido de {caminho}.")
     elif os.environ.get(nome):
         valor = os.environ[nome].strip()
         print(f"`{nome}` lido do ambiente.")
@@ -202,10 +223,10 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    if not NOME_DE_CONTA.match(args.dono):
-        raise SystemExit(f"--dono nao parece uma conta do GitHub: {args.dono!r}")
-    if not REPO_COMPLETO.match(args.gitops_repo):
-        raise SystemExit(f"--gitops-repo precisa ser dono/repo; recebi {args.gitops_repo!r}")
+    args.dono = so_o_que_casa(NOME_DE_CONTA, args.dono, "--dono nao parece uma conta do GitHub")
+    args.gitops_repo = so_o_que_casa(
+        REPO_COMPLETO, args.gitops_repo, "--gitops-repo precisa ser dono/repo"
+    )
 
     exige_ferramentas()
 
