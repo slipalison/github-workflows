@@ -195,6 +195,15 @@ on:
         value: ${{ jobs.versao.outputs.salto }}
 
     secrets:
+      GH_PACKAGES_TOKEN:
+        description: >-
+          Token de LEITURA do npm do GitHub (`read:packages`), para repositorio
+          cujo frontend dependa de pacote privado do proprio dono. Vai a tres
+          lugares, porque sao tres os pontos que instalam: o `npm ci` do job de
+          qualidade, o `comando_testes` do Sonar, e o `docker build` — neste
+          ultimo como SECRET DO BUILDKIT (id `npm_token`), nunca como build-arg.
+          Opcional: quem nao consome pacote privado nao passa, e nada muda.
+        required: false
       SONAR_TOKEN:
         required: false
       GITOPS_SSH_KEY:
@@ -222,6 +231,8 @@ jobs:
     uses: slipalison/github-workflows/.github/workflows/qualidade.yml@main
     with:
       componentes: ${{ inputs.componentes }}
+    secrets:
+      GH_PACKAGES_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
 
   imagem:
     if: inputs.imagem != ''
@@ -237,6 +248,8 @@ jobs:
       trivyignores: ${{ inputs.trivyignores }}
       severidade_bloqueante: ${{ inputs.severidade_bloqueante }}
       publicar_sarif: ${{ inputs.publicar_sarif }}
+    secrets:
+      GH_PACKAGES_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
 
   sonar:
     if: inputs.sonar_projeto != ''
@@ -255,6 +268,7 @@ jobs:
       exigir_token: ${{ inputs.sonar_exigir_token }}
     secrets:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      GH_PACKAGES_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
 
   seguranca:
     permissions:

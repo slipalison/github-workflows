@@ -265,11 +265,19 @@ Os secrets que ele conhece, e como cada um encontra o próprio público:
 | `GITOPS_SSH_KEY` | quem chama o `deploy.yml` ou o `pipeline.yml` | — |
 | `GITOPS_TOKEN` | idem — **alternativa** à chave SSH, não um segundo requisito | — |
 | `NPM_TOKEN` | quem referencia `secrets.NPM_TOKEN` no próprio workflow | `GET /-/whoami` do registry |
+| `GH_PACKAGES_TOKEN` | quem referencia `secrets.GH_PACKAGES_TOKEN` no próprio workflow | `GET /user`, exigindo o escopo `read:packages` |
 
-O `NPM_TOKEN` é o único cujo padrão **não** é o caminho desta esteira: quem
-publica no npm tem workflow próprio. O critério vira a referência ao próprio
-secret, que é o mais honesto que existe — se um workflow o lê, aquele
+O `NPM_TOKEN` e o `GH_PACKAGES_TOKEN` são os únicos cujo padrão **não** é o
+caminho desta esteira: quem publica no npm tem workflow próprio, e quem lê
+pacote privado declara o secret no `ci.yml`. O critério vira a referência ao
+próprio secret, que é o mais honesto que existe — se um workflow o lê, aquele
 repositório precisa dele.
+
+**Os dois têm nome separado de propósito, e não por gosto.** `NPM_TOKEN`
+**publica** no npmjs; `GH_PACKAGES_TOKEN` **lê** do npm do GitHub. Um nome só
+para os dois faria a próxima rotação gravar o token de publicação onde se
+espera o de leitura — e o estrago apareceria meses depois, num `npm ci` com 401
+dentro de um `docker build`, onde a mensagem do npm nem diz qual token faltou.
 
 **Alternativas contam como atendidas.** `GITOPS_SSH_KEY` e `GITOPS_TOKEN` se
 substituem: o `deploy.yml` usa o que encontrar. Sem essa tabela o `--conferir`
@@ -314,6 +322,80 @@ Em **Git Bash ou MSYS**, prefira `--arquivo` ou a variável de ambiente: o
 `getpass` do Python não lê colagem de forma confiável nesses terminais.
 
 ---
+
+## Pacote privado no `npm ci` e no `docker build`
+
+Um frontend que dependa de pacote privado do próprio dono — `@dono/design-system`
+no npm do GitHub, por exemplo — precisa de token em **três** pontos, e não em um:
+o `npm ci` do job de qualidade, o `comando_testes` do Sonar (que instala de novo,
+porque roda os testes numa máquina própria) e o `docker build`. Esquecer qualquer
+um dá 401 num lugar diferente, em momentos diferentes.
+
+O `pipeline.yml` recebe **um** secret opcional e o distribui pelos três:
+
+```yaml
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      GITOPS_SSH_KEY: ${{ secrets.GITOPS_SSH_KEY }}
+      GH_PACKAGES_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
+```
+
+No repositório, o `.npmrc` **referencia** a variável em vez de trazer o token
+escrito — é o que permite versionar o arquivo:
+
+```
+@dono:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}
+```
+
+Nos jobs de node, o token entra como `NODE_AUTH_TOKEN`. No build da imagem ele
+entra como **secret do BuildKit**, com id `npm_token`, e o Dockerfile o consome
+assim:
+
+```dockerfile
+RUN --mount=type=secret,id=npm_token     NODE_AUTH_TOKEN="$(cat /run/secrets/npm_token)" npm ci --ignore-scripts
+```
+
+**Por que não `build-arg`.** `ARG` fica gravado no histórico da imagem e sai
+inteiro num `docker history` — quem puxa a imagem do GHCR lê o token. O
+`--mount=type=secret` monta o valor em tmpfs só durante aquele `RUN`, e não
+entra em camada nenhuma: nem na imagem, nem no cache `type=gha`, que guarda
+**camadas intermediárias** e por isso vazaria um `npm config set` feito no
+estágio de build.
+
+Repositório que não consome pacote privado não passa o secret, não declara o
+`--mount`, e nada muda: secret não consumido pelo BuildKit não emite nem aviso.
+
+### `liberar_pacotes.py` — os quatro pontos num comando
+
+O token faz falta em **quatro** lugares, e não em três: os do CI mais a máquina
+de quem escreve, onde o `npm install` também responde 401.
+
+```bash
+# o que falta, sem mudar nada. Sai 1 se faltar algo.
+python bin/liberar_pacotes.py --conferir --pacote @dono/pacote --repo dono/repo
+
+# conserta: pede o escopo que falta e grava o secret
+python bin/liberar_pacotes.py --aplicar  --pacote @dono/pacote --repo dono/repo
+```
+
+Ele pede `read:packages` ao `gh` (fluxo interativo, herdando o terminal — sem
+isso o código de uso único não apareceria), grava o `GH_PACKAGES_TOKEN` nos
+repositórios por **STDIN**, e imprime a linha de `export` da máquina local.
+Idempotente: rodar de novo não estraga nada.
+
+**O `--pacote` é o que dá valor à conferência.** Ter `read:packages` escrito na
+lista de escopos não é a mesma coisa que o registro aceitar o token — escopo
+revogado do lado do dono, token de organização sem acesso concedido ao
+repositório, ou nome de pacote errado dão os três a mesma aparência de "está
+tudo certo" e o mesmo 401 no `npm ci`. A prova é um GET no registro pedindo o
+pacote que o projeto instala de verdade.
+
+Por padrão o token que vai para o CI é o do próprio `gh`, que **morre junto com
+a autorização do gh** — `gh auth logout` ou revogar o app derruba o CI sem
+ninguém ter mexido nele. Para um token que não depende disso, crie um PAT com
+`read:packages` e só isso e passe `--de-arquivo`; é o mesmo formato que o
+`semear_secret.py` espera em `--de-diretorio`.
 
 ## Versão automática
 

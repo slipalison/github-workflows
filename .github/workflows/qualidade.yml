@@ -41,6 +41,14 @@ on:
         required: false
         type: number
         default: 20
+    secrets:
+      GH_PACKAGES_TOKEN:
+        description: >-
+          Token de LEITURA do npm do GitHub (`read:packages`), para componente
+          node que dependa de pacote privado do proprio dono. So o `npm ci`
+          precisa dele: `build` e `test` nao falam com o registro, e o npm
+          tolera a variavel ausente no `.npmrc` (medido no npm 11). Opcional.
+        required: false
 
 permissions:
   contents: read
@@ -136,6 +144,9 @@ jobs:
         env:
           HUSKY: "0"
           SCRIPTS: ${{ matrix.c.scripts_de_instalacao == true && 'sim' || 'nao' }}
+          # Lido pelo `.npmrc` do projeto, que referencia a variavel em vez de
+          # trazer o token escrito. So este passo fala com o registro.
+          NODE_AUTH_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
         run: |
           set -euo pipefail
           if [ "$SCRIPTS" = "sim" ]; then
