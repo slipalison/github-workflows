@@ -164,6 +164,11 @@ def escopos_do_token(valor: str) -> set[str] | None:
 
 def le_pacote(valor: str, pacote: str) -> tuple[bool, str]:
     """(deu certo, o que dizer). A prova de verdade: o registro aceitou?"""
+    # Mesma razao do `exige_forma_de_repo`: `..` num nome de pacote viraria
+    # outro caminho na URL do registro. O `quote` ja escaparia a barra, mas
+    # recusar a forma errada e mais barato do que confiar no escape.
+    if not FORMA_DE_PACOTE.match(pacote):
+        raise ValueError(f"pacote fora da forma @escopo/nome: {pacote!r}")
     caminho = urllib.parse.quote(pacote, safe="")
     req = urllib.request.Request(
         f"{REGISTRO}/{caminho}",
@@ -189,8 +194,22 @@ def le_pacote(valor: str, pacote: str) -> tuple[bool, str]:
     return True, f"{pacote}: o registro entregou (ultima versao {versao})"
 
 
+def exige_forma_de_repo(repo: str) -> None:
+    """Recusa o que nao tem a forma `dono/repo`, JUNTO DO USO.
+
+    A conferencia tambem acontece na entrada (`confere_a_forma`), e as duas sao
+    necessarias por motivos diferentes: aquela da mensagem boa para quem digitou
+    errado; esta protege quem chamar estas funcoes de outro lugar, sem ter
+    passado pela linha de comando. Um valor comecando com hifen seria lido pelo
+    proprio `gh` como OPCAO, e nao como nome de repositorio.
+    """
+    if not FORMA_DE_REPO.match(repo):
+        raise ValueError(f"repositorio fora da forma dono/repo: {repo!r}")
+
+
 def secret_ja_existe(repo: str) -> bool | None:
     """True/False, ou None se nao deu para olhar (sem permissao, repo errado)."""
+    exige_forma_de_repo(repo)
     saida = gh("secret", "list", "--repo", repo, "--json", "name", checar=False)
     if not saida.strip():
         return None
@@ -203,6 +222,7 @@ def secret_ja_existe(repo: str) -> bool | None:
 
 def grava_secret(repo: str, valor: str) -> bool:
     """Grava por STDIN. O valor nunca aparece em argv nem na saida."""
+    exige_forma_de_repo(repo)
     r = subprocess.run(
         ["gh", "secret", "set", NOME_DO_SECRET, "--repo", repo],
         input=valor.encode("utf-8"),
@@ -332,6 +352,21 @@ def passo_prova(args: argparse.Namespace, valor: str) -> bool:
     return faltou
 
 
+def trata_um_repo(repo: str, valor: str, *, somente_conferir: bool) -> bool:
+    """Faltou alguma coisa NESTE repositorio?"""
+    existe = secret_ja_existe(repo)
+    if existe is None:
+        erro(f"{repo}: nao deu para listar os secrets (repo errado, ou sem permissao)")
+        return True
+    if somente_conferir:
+        (ok if existe else erro)(f"{repo}: {'ja esta la' if existe else 'FALTA'}")
+        return not existe
+    if not grava_secret(repo, valor):
+        return True
+    ok(f"{repo}: gravado{' (sobrescrito)' if existe else ''}")
+    return False
+
+
 def passo_secrets(args: argparse.Namespace, valor: str) -> bool:
     """Faltou alguma coisa?"""
     print(f"4. {NOME_DO_SECRET} nos repositorios")
@@ -340,17 +375,7 @@ def passo_secrets(args: argparse.Namespace, valor: str) -> bool:
         return False
     faltou = False
     for repo in args.repo:
-        existe = secret_ja_existe(repo)
-        if existe is None:
-            erro(f"{repo}: nao deu para listar os secrets (repo errado, ou sem permissao)")
-            faltou = True
-        elif args.conferir:
-            (ok if existe else erro)(f"{repo}: {'ja esta la' if existe else 'FALTA'}")
-            faltou = faltou or not existe
-        elif grava_secret(repo, valor):
-            ok(f"{repo}: gravado{' (sobrescrito)' if existe else ''}")
-        else:
-            faltou = True
+        faltou = trata_um_repo(repo, valor, somente_conferir=args.conferir) or faltou
     return faltou
 
 
