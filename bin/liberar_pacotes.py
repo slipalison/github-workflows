@@ -92,7 +92,8 @@ SERVIDOR = "github.com"
 # `dono/repo` e `@escopo/nome`, nas formas que o GitHub e o npm aceitam. O
 # ancoramento nas duas pontas e o que importa: sem ele, `--repo -X` passaria.
 FORMA_DE_REPO = re.compile(
-    r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"
+    r"^(?P<dono>[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)"
+    r"/(?P<nome>[A-Za-z0-9][A-Za-z0-9._-]{0,99})$"
 )
 FORMA_DE_PACOTE = re.compile(r"^(?:@[a-z0-9][a-z0-9._-]{0,99}/)?[a-z0-9][a-z0-9._-]{0,99}$")
 
@@ -167,9 +168,10 @@ def le_pacote(valor: str, pacote: str) -> tuple[bool, str]:
     # Mesma razao do `exige_forma_de_repo`: `..` num nome de pacote viraria
     # outro caminho na URL do registro. O `quote` ja escaparia a barra, mas
     # recusar a forma errada e mais barato do que confiar no escape.
-    if not FORMA_DE_PACOTE.match(pacote):
+    casou = FORMA_DE_PACOTE.match(pacote)
+    if casou is None:
         raise ValueError(f"pacote fora da forma @escopo/nome: {pacote!r}")
-    caminho = urllib.parse.quote(pacote, safe="")
+    caminho = urllib.parse.quote(casou.group(0), safe="")
     req = urllib.request.Request(
         f"{REGISTRO}/{caminho}",
         headers={"Authorization": f"Bearer {valor}", "Accept": "application/json"},
@@ -194,23 +196,29 @@ def le_pacote(valor: str, pacote: str) -> tuple[bool, str]:
     return True, f"{pacote}: o registro entregou (ultima versao {versao})"
 
 
-def exige_forma_de_repo(repo: str) -> None:
-    """Recusa o que nao tem a forma `dono/repo`, JUNTO DO USO.
+def alvo_de_repo(repo: str) -> str:
+    """O `dono/repo` RECONSTRUIDO a partir do casamento, ou ValueError.
 
-    A conferencia tambem acontece na entrada (`confere_a_forma`), e as duas sao
-    necessarias por motivos diferentes: aquela da mensagem boa para quem digitou
-    errado; esta protege quem chamar estas funcoes de outro lugar, sem ter
-    passado pela linha de comando. Um valor comecando com hifen seria lido pelo
-    proprio `gh` como OPCAO, e nao como nome de repositorio.
+    Nao devolve o texto que entrou: devolve `dono` e `nome` colados de novo, e
+    os dois saem dos grupos da expressao. A diferenca importa. Conferir e
+    seguir usando o original deixa o valor de fora ligado ao uso — para quem
+    le, e para a analise de taint do Sonar, que esta certa em nao aceitar
+    conferencia feita noutro lugar. Reconstruir corta o fio: o que chega ao
+    `gh` foi montado aqui, a partir de duas partes que casaram com a forma.
+
+    A conferencia da entrada (`confere_a_forma`) continua existindo, com outro
+    proposito: dar a mensagem boa a quem digitou errado, antes de o comando
+    comecar a trabalhar.
     """
-    if not FORMA_DE_REPO.match(repo):
+    casou = FORMA_DE_REPO.match(repo)
+    if casou is None:
         raise ValueError(f"repositorio fora da forma dono/repo: {repo!r}")
+    return f"{casou['dono']}/{casou['nome']}"
 
 
 def secret_ja_existe(repo: str) -> bool | None:
     """True/False, ou None se nao deu para olhar (sem permissao, repo errado)."""
-    exige_forma_de_repo(repo)
-    saida = gh("secret", "list", "--repo", repo, "--json", "name", checar=False)
+    saida = gh("secret", "list", "--repo", alvo_de_repo(repo), "--json", "name", checar=False)
     if not saida.strip():
         return None
     try:
@@ -222,9 +230,9 @@ def secret_ja_existe(repo: str) -> bool | None:
 
 def grava_secret(repo: str, valor: str) -> bool:
     """Grava por STDIN. O valor nunca aparece em argv nem na saida."""
-    exige_forma_de_repo(repo)
+    alvo = alvo_de_repo(repo)
     r = subprocess.run(
-        ["gh", "secret", "set", NOME_DO_SECRET, "--repo", repo],
+        ["gh", "secret", "set", NOME_DO_SECRET, "--repo", alvo],
         input=valor.encode("utf-8"),
         capture_output=True,
     )
