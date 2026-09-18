@@ -87,6 +87,13 @@ on:
         type: boolean
         default: true
     secrets:
+      GH_PACKAGES_TOKEN:
+        description: >-
+          Token de LEITURA do npm do GitHub (`read:packages`), para componente
+          node que dependa de pacote privado do proprio dono. So o `npm ci`
+          precisa dele: `build` e `test` nao falam com o registro, e o npm
+          tolera a variavel ausente no `.npmrc` (medido no npm 11). Opcional.
+        required: false
       SONAR_TOKEN:
         required: false
 
@@ -102,6 +109,9 @@ jobs:
       contents: read
     env:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      # No nivel do JOB de proposito: quem instala aqui e o `comando_testes` do
+      # repositorio, que pode chamar `npm ci` em qualquer ponto da linha.
+      NODE_AUTH_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
     steps:
       # PRIMEIRO passo, antes de qualquer checkout: se a configuracao esta
       # quebrada, o run tem de morrer aqui e dizer por que, e nao quinze minutos

@@ -114,6 +114,13 @@ PADROES = {
     # criterio mais honesto que existe: se um workflow le `secrets.NPM_TOKEN`,
     # aquele repositorio precisa dele. Sem falso positivo possivel.
     "NPM_TOKEN": ("secrets.NPM_TOKEN", "NODE_AUTH_TOKEN"),
+    # GH_PACKAGES_TOKEN e o oposto do NPM_TOKEN e por isso tem nome proprio: um
+    # PUBLICA no npmjs, o outro LE do npm do GitHub. Reusar o nome faria a
+    # rotacao gravar o token de publicacao onde se espera o de leitura, e o
+    # estrago so apareceria meses depois, num `npm ci` com 401 que ninguem
+    # liga a rotacao. Pelo mesmo motivo do NPM_TOKEN, o padrao e a referencia
+    # ao proprio secret: quem le, precisa.
+    "GH_PACKAGES_TOKEN": ("secrets.GH_PACKAGES_TOKEN",),
 }
 
 # Secrets que se SUBSTITUEM. O `deploy.yml` aceita chave SSH ou token
@@ -250,7 +257,51 @@ def valida_npm(valor: str) -> str | None:
         return None
 
 
-VALIDADORES = {"SONAR_TOKEN": valida_sonar, "NPM_TOKEN": valida_npm}
+def valida_gh_packages(valor: str) -> str | None:
+    """Confere se o token abre o npm do GitHub, antes de grava-lo.
+
+    Mesmo motivo do `valida_npm`: token que nao serve grava sem reclamar e so
+    aparece no dia do build, num `npm ci` com 401 dentro do `docker build` —
+    onde a mensagem do npm nem diz qual token faltou.
+
+    Token classico (`ghp_`/`gho_`) devolve os escopos num cabecalho, e ai da
+    para exigir `read:packages` sem chutar. Token fine-grained nao devolve
+    cabecalho nenhum: ali a conferencia e inconclusiva, e dizer isso e mais
+    honesto do que reprovar um token que talvez esteja certo.
+    """
+    req = urllib.request.Request(
+        "https://api.github.com/user",
+        headers={
+            "Authorization": f"Bearer {valor}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            escopos = r.headers.get("x-oauth-scopes")
+        if escopos is None:
+            print("  aviso: token fine-grained nao informa escopo; seguindo sem conferir.")
+            return None
+        tem = {e.strip() for e in escopos.split(",") if e.strip()}
+        if "read:packages" not in tem:
+            visto = ", ".join(sorted(tem)) or "nenhum"
+            return f"sem o escopo read:packages (escopos deste token: {visto})"
+        return None
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return f"HTTP {e.code} — o GitHub recusou este token (vencido ou revogado)"
+        return f"HTTP {e.code} — o GitHub nao aceitou a conferencia"
+    except Exception as e:  # noqa: BLE001 - rede, DNS, TLS: tudo aqui e inconclusivo
+        print(f"  aviso: nao deu para validar ({e}); seguindo sem conferir.")
+        return None
+
+
+VALIDADORES = {
+    "SONAR_TOKEN": valida_sonar,
+    "NPM_TOKEN": valida_npm,
+    "GH_PACKAGES_TOKEN": valida_gh_packages,
+}
 
 
 def secrets_do_repo(dono: str, repo: str) -> set[str] | None:

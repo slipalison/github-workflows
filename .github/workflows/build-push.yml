@@ -56,6 +56,16 @@ on:
       digest:
         description: "Digest da imagem publicada, para referencia imutavel"
         value: ${{ jobs.build.outputs.digest }}
+    secrets:
+      GH_PACKAGES_TOKEN:
+        description: >-
+          Token de LEITURA do npm do GitHub (`read:packages`), para Dockerfile
+          que instala pacote privado do proprio dono. Chega ao build como
+          secret do BuildKit com id `npm_token`, NUNCA como `build-arg`:
+          build-arg fica gravado no historico da imagem e sai inteiro num
+          `docker history`. Opcional — repositorio que nao consome pacote
+          privado nao declara, e o secret chega vazio sem quebrar nada.
+        required: false
 
 permissions:
   contents: read
@@ -124,6 +134,13 @@ jobs:
           # endpoint de versao informa o que foi pedido, e nao o que rodou.
           build-args: |
             GIT_SHA=${{ steps.meta.outputs.sha }}
+          # Secret do BuildKit, e nao `build-arg`. O valor e montado em
+          # `/run/secrets/npm_token` durante o RUN que o pede e nao entra em
+          # camada nenhuma — nem na imagem, nem no cache `type=gha`, que guarda
+          # camadas intermediarias. Dockerfile que nao declara o `--mount`
+          # simplesmente ignora; secret nao consumido nao emite nem aviso.
+          secrets: |
+            npm_token=${{ secrets.GH_PACKAGES_TOKEN }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
@@ -141,6 +158,13 @@ jobs:
           tags: ${{ inputs.image }}:${{ steps.meta.outputs.tag }}
           build-args: |
             GIT_SHA=${{ steps.meta.outputs.sha }}
+          # Secret do BuildKit, e nao `build-arg`. O valor e montado em
+          # `/run/secrets/npm_token` durante o RUN que o pede e nao entra em
+          # camada nenhuma — nem na imagem, nem no cache `type=gha`, que guarda
+          # camadas intermediarias. Dockerfile que nao declara o `--mount`
+          # simplesmente ignora; secret nao consumido nao emite nem aviso.
+          secrets: |
+            npm_token=${{ secrets.GH_PACKAGES_TOKEN }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
