@@ -38,6 +38,16 @@ por qualquer processo da maquina (`ps aux`, e no Windows o Process Explorer).
 Aqui o valor vai por STDIN, em bytes, e nunca e impresso — nem em erro, nem
 em modo verboso, porque nao ha modo verboso.
 
+O QUE VEM DA LINHA DE COMANDO E CONFERIDO ANTES DE VIRAR ARGUMENTO
+------------------------------------------------------------------
+`--repo` e `--pacote` entram em `subprocess` e em URL. Nao ha shell no
+caminho (a lista de argumentos vai direto ao processo), entao injecao de
+comando nao cabe — mas um valor comecando com `-` seria lido pelo proprio
+`gh` como OPCAO, e um `..` no nome do pacote viraria outro caminho na URL do
+registro. Os dois sao conferidos contra a forma esperada antes de qualquer
+uso, pelo mesmo motivo que o `semear_secret.py` confere nome de repositorio
+vindo da API: e mais barato recusar cedo do que entender depois.
+
 USO
 ---
     # o que falta, sem mudar nada. Sai 1 se faltar algo.
@@ -65,6 +75,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -72,10 +84,17 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-SECRET = "GH_PACKAGES_TOKEN"
+NOME_DO_SECRET = "GH_PACKAGES_TOKEN"
 ESCOPO = "read:packages"
 REGISTRO = "https://npm.pkg.github.com"
 SERVIDOR = "github.com"
+
+# `dono/repo` e `@escopo/nome`, nas formas que o GitHub e o npm aceitam. O
+# ancoramento nas duas pontas e o que importa: sem ele, `--repo -X` passaria.
+FORMA_DE_REPO = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"
+)
+FORMA_DE_PACOTE = re.compile(r"^(?:@[a-z0-9][a-z0-9._-]{0,99}/)?[a-z0-9][a-z0-9._-]{0,99}$")
 
 # Codigo de saida: 0 tudo certo, 1 falta alguma coisa. Um so, de proposito —
 # quem chama isto num script quer saber "posso seguir?", e nao catalogar
@@ -162,7 +181,9 @@ def le_pacote(valor: str, pacote: str) -> tuple[bool, str]:
                 f"enxerga o pacote (os dois casos respondem 404 aqui)"
             )
         return False, f"{pacote}: HTTP {e.code} — o registro nao respondeu o que se esperava"
-    except Exception as e:  # noqa: BLE001 - rede, DNS, TLS: tudo aqui e inconclusivo
+    # Rede, DNS, TLS: tudo o que cai aqui e inconclusivo, e inconclusivo nao e
+    # reprovado. Por isso a captura e larga de proposito.
+    except Exception as e:  # noqa: BLE001
         return False, f"{pacote}: nao deu para conferir ({e})"
     versao = (dados.get("dist-tags") or {}).get("latest", "?")
     return True, f"{pacote}: o registro entregou (ultima versao {versao})"
@@ -177,13 +198,13 @@ def secret_ja_existe(repo: str) -> bool | None:
         nomes = {s["name"] for s in json.loads(saida)}
     except (ValueError, KeyError, TypeError):
         return None
-    return SECRET in nomes
+    return NOME_DO_SECRET in nomes
 
 
 def grava_secret(repo: str, valor: str) -> bool:
     """Grava por STDIN. O valor nunca aparece em argv nem na saida."""
     r = subprocess.run(
-        ["gh", "secret", "set", SECRET, "--repo", repo],
+        ["gh", "secret", "set", NOME_DO_SECRET, "--repo", repo],
         input=valor.encode("utf-8"),
         capture_output=True,
     )
@@ -210,7 +231,130 @@ def linha_de_export() -> None:
     print("pacote privado e que precisa dela.")
 
 
-def main() -> int:
+def confere_a_forma(args: argparse.Namespace) -> bool:
+    """Recusa o que nao tem a forma esperada, antes de virar argumento."""
+    bom = True
+    for repo in args.repo:
+        if not FORMA_DE_REPO.match(repo):
+            erro(f"--repo {repo!r} nao tem a forma dono/repo")
+            bom = False
+    for pacote in args.pacote:
+        if not FORMA_DE_PACOTE.match(pacote):
+            erro(f"--pacote {pacote!r} nao tem a forma @escopo/nome")
+            bom = False
+    return bom
+
+
+def passo_token(args: argparse.Namespace) -> str | None:
+    """O token que sera conferido e gravado, ou None se nao deu para obter."""
+    print("1. Token")
+    if not args.de_arquivo:
+        if gh("auth", "status", checar=False) == "" and gh("auth", "token", checar=False) == "":
+            erro("o `gh` nao esta autenticado. Rode `gh auth login`.")
+            return None
+        ok("usando o token do proprio `gh`")
+        return token_do_gh()
+
+    # O caminho vem de quem roda o comando, e ler o arquivo que a pessoa
+    # aponta E a funcionalidade do `--de-arquivo`. O que da para exigir, e e
+    # exigido, e que ele exista e seja arquivo de verdade: assim um diretorio
+    # ou um caminho torto falha aqui, com o nome resolvido na mensagem, em vez
+    # de falhar adiante como "token vazio".
+    caminho = pathlib.Path(args.de_arquivo).expanduser().resolve()
+    if not caminho.is_file():
+        erro(f"nao e um arquivo: {caminho}")
+        return None
+    try:
+        valor = caminho.read_text(encoding="utf-8").strip()
+    except OSError as e:
+        erro(f"nao deu para ler {caminho}: {e}")
+        return None
+    if not valor:
+        erro(f"{caminho} esta vazio")
+        return None
+    ok(f"lido de {caminho} (o arquivo nao foi tocado; apague voce, depois)")
+    return valor
+
+
+def passo_escopo(args: argparse.Namespace, valor: str) -> tuple[str | None, bool]:
+    """(token que vale daqui em diante, faltou alguma coisa)."""
+    print("2. Escopo")
+    try:
+        escopos = escopos_do_token(valor)
+    except urllib.error.HTTPError as e:
+        erro(f"o GitHub recusou o token (HTTP {e.code})")
+        return None, True
+    # Rede: inconclusivo, nao reprovado. A prova no registro decide.
+    except Exception as e:  # noqa: BLE001
+        aviso(f"nao deu para conferir o escopo ({e}); seguindo para a prova no registro")
+        return valor, False
+
+    if escopos is None:
+        aviso("token fine-grained nao informa escopo — quem decide e a prova abaixo")
+        return valor, False
+    if ESCOPO in escopos:
+        ok(f"{ESCOPO} presente")
+        return valor, False
+    if args.de_arquivo:
+        erro(f"este token nao tem {ESCOPO}. Crie outro PAT, com esse escopo.")
+        return valor, True
+    if args.conferir:
+        erro(f"falta {ESCOPO}. Com --aplicar eu peco (abre o navegador).")
+        return valor, True
+
+    print(f"  ...    pedindo {ESCOPO} ao GitHub. COLE O CODIGO no navegador que vai abrir.")
+    print()
+    rc = gh_interativo("auth", "refresh", "-h", SERVIDOR, "-s", ESCOPO)
+    print()
+    if rc != 0:
+        erro("o `gh auth refresh` nao concluiu — o token antigo continua valendo")
+        return None, True
+    novo = token_do_gh()
+    depois = escopos_do_token(novo)
+    if depois is not None and ESCOPO not in depois:
+        erro(f"mesmo depois do refresh, {ESCOPO} nao aparece. O fluxo foi concluido mesmo?")
+        return None, True
+    ok(f"{ESCOPO} concedido")
+    return novo, False
+
+
+def passo_prova(args: argparse.Namespace, valor: str) -> bool:
+    """Faltou alguma coisa?"""
+    print("3. Prova no registro")
+    if not args.pacote:
+        aviso("nenhum --pacote: nao da para provar que o registro aceita este token")
+        return False
+    faltou = False
+    for pacote in args.pacote:
+        deu, recado = le_pacote(valor, pacote)
+        (ok if deu else erro)(recado)
+        faltou = faltou or not deu
+    return faltou
+
+
+def passo_secrets(args: argparse.Namespace, valor: str) -> bool:
+    """Faltou alguma coisa?"""
+    print(f"4. {NOME_DO_SECRET} nos repositorios")
+    if not args.repo:
+        aviso("nenhum --repo: o CI nao foi tocado")
+        return False
+    faltou = False
+    for repo in args.repo:
+        existe = secret_ja_existe(repo)
+        if existe is None:
+            erro(f"{repo}: nao deu para listar os secrets (repo errado, ou sem permissao)")
+            faltou = True
+        elif args.conferir:
+            (ok if existe else erro)(f"{repo}: {'ja esta la' if existe else 'FALTA'}")
+            faltou = faltou or not existe
+        elif grava_secret(repo, valor):
+            ok(f"{repo}: gravado{' (sobrescrito)' if existe else ''}")
+        else:
+            faltou = True
+    return faltou
+
+
+def argumentos() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
             "Libera a leitura de pacote privado do npm do GitHub, na maquina e no CI. "
@@ -236,7 +380,7 @@ def main() -> int:
         action="append",
         default=[],
         metavar="DONO/REPO",
-        help=f"onde gravar o {SECRET}; repetivel. Sem isto, so a parte local.",
+        help=f"onde gravar o {NOME_DO_SECRET}; repetivel. Sem isto, so a parte local.",
     )
     p.add_argument(
         "--de-arquivo",
@@ -246,99 +390,29 @@ def main() -> int:
             "que nao morre junto com a autorizacao do gh."
         ),
     )
-    args = p.parse_args()
+    return p.parse_args()
+
+
+def main() -> int:
+    args = argumentos()
 
     if shutil.which("gh") is None:
         erro("o `gh` nao esta no PATH. https://cli.github.com")
         return FALTA
-
-    faltou = False
-
-    # ---------------------------------------------------------------- 1. token
-    print("1. Token")
-    if args.de_arquivo:
-        try:
-            with open(args.de_arquivo, encoding="utf-8") as f:
-                valor = f.read().strip()
-        except OSError as e:
-            erro(f"nao deu para ler {args.de_arquivo}: {e}")
-            return FALTA
-        if not valor:
-            erro(f"{args.de_arquivo} esta vazio")
-            return FALTA
-        ok(f"lido de {args.de_arquivo} (o arquivo nao foi tocado; apague voce, depois)")
-    else:
-        if gh("auth", "status", checar=False) == "" and gh("auth", "token", checar=False) == "":
-            erro("o `gh` nao esta autenticado. Rode `gh auth login`.")
-            return FALTA
-        valor = token_do_gh()
-        ok("usando o token do proprio `gh`")
-
-    # --------------------------------------------------------------- 2. escopo
-    print("2. Escopo")
-    try:
-        escopos = escopos_do_token(valor)
-    except urllib.error.HTTPError as e:
-        erro(f"o GitHub recusou o token (HTTP {e.code})")
+    if not confere_a_forma(args):
         return FALTA
-    except Exception as e:  # noqa: BLE001 - rede: inconclusivo, nao reprovado
-        aviso(f"nao deu para conferir o escopo ({e}); seguindo para a prova no registro")
-        escopos = None
 
-    if escopos is None:
-        aviso("token fine-grained nao informa escopo — quem decide e a prova abaixo")
-    elif ESCOPO in escopos:
-        ok(f"{ESCOPO} presente")
-    elif args.de_arquivo:
-        erro(f"este token nao tem {ESCOPO}. Crie outro PAT, com esse escopo.")
-        faltou = True
-    elif args.conferir:
-        erro(f"falta {ESCOPO}. Com --aplicar eu peco (abre o navegador).")
-        faltou = True
-    else:
-        print(f"  ...    pedindo {ESCOPO} ao GitHub. COLE O CODIGO no navegador que vai abrir.")
-        print()
-        rc = gh_interativo("auth", "refresh", "-h", SERVIDOR, "-s", ESCOPO)
-        print()
-        if rc != 0:
-            erro("o `gh auth refresh` nao concluiu — o token antigo continua valendo")
-            return FALTA
-        valor = token_do_gh()
-        depois = escopos_do_token(valor)
-        if depois is not None and ESCOPO not in depois:
-            erro(f"mesmo depois do refresh, {ESCOPO} nao aparece. O fluxo foi concluido mesmo?")
-            return FALTA
-        ok(f"{ESCOPO} concedido")
+    valor = passo_token(args)
+    if valor is None:
+        return FALTA
 
-    # ---------------------------------------------------------------- 3. prova
-    print("3. Prova no registro")
-    if not args.pacote:
-        aviso("nenhum --pacote: nao da para provar que o registro aceita este token")
-    for pacote in args.pacote:
-        deu, recado = le_pacote(valor, pacote)
-        (ok if deu else erro)(recado)
-        faltou = faltou or not deu
+    valor, faltou = passo_escopo(args, valor)
+    if valor is None:
+        return FALTA
 
-    # -------------------------------------------------------------- 4. secrets
-    print(f"4. {SECRET} nos repositorios")
-    if not args.repo:
-        aviso("nenhum --repo: o CI nao foi tocado")
-    for repo in args.repo:
-        existe = secret_ja_existe(repo)
-        if existe is None:
-            erro(f"{repo}: nao deu para listar os secrets (repo errado, ou sem permissao)")
-            faltou = True
-            continue
-        if args.conferir:
-            (ok if existe else erro)(f"{repo}: {'ja esta la' if existe else 'FALTA'}")
-            faltou = faltou or not existe
-            continue
-        if grava_secret(repo, valor):
-            ok(f"{repo}: gravado{' (sobrescrito)' if existe else ''}")
-        else:
-            faltou = True
+    faltou = passo_prova(args, valor) or faltou
+    faltou = passo_secrets(args, valor) or faltou
 
-    # ----------------------------------------------------------------- arremate
     linha_de_export()
     print()
     if faltou:

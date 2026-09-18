@@ -224,7 +224,9 @@ def valida_sonar(valor: str) -> str | None:
         return None if quem.get("login") else "resposta sem login"
     except urllib.error.HTTPError as e:
         return f"HTTP {e.code} — o SonarCloud recusou este token"
-    except Exception as e:  # noqa: BLE001 - rede, DNS, TLS: tudo aqui e inconclusivo
+    # Rede, DNS, TLS: tudo o que cai aqui e inconclusivo, e inconclusivo nao e
+    # reprovado. Por isso a captura e larga de proposito.
+    except Exception as e:  # noqa: BLE001
         print(f"  aviso: nao deu para validar ({e}); seguindo sem conferir.")
         return None
 
@@ -252,7 +254,9 @@ def valida_npm(valor: str) -> str | None:
         if e.code in (401, 403):
             return f"HTTP {e.code} — o npm recusou este token (vencido, revogado ou incompleto)"
         return f"HTTP {e.code} — o npm nao aceitou a conferencia"
-    except Exception as e:  # noqa: BLE001 - rede, DNS, TLS: tudo aqui e inconclusivo
+    # Rede, DNS, TLS: tudo o que cai aqui e inconclusivo, e inconclusivo nao e
+    # reprovado. Por isso a captura e larga de proposito.
+    except Exception as e:  # noqa: BLE001
         print(f"  aviso: nao deu para validar ({e}); seguindo sem conferir.")
         return None
 
@@ -292,7 +296,9 @@ def valida_gh_packages(valor: str) -> str | None:
         if e.code in (401, 403):
             return f"HTTP {e.code} — o GitHub recusou este token (vencido ou revogado)"
         return f"HTTP {e.code} — o GitHub nao aceitou a conferencia"
-    except Exception as e:  # noqa: BLE001 - rede, DNS, TLS: tudo aqui e inconclusivo
+    # Rede, DNS, TLS: tudo o que cai aqui e inconclusivo, e inconclusivo nao e
+    # reprovado. Por isso a captura e larga de proposito.
+    except Exception as e:  # noqa: BLE001
         print(f"  aviso: nao deu para validar ({e}); seguindo sem conferir.")
         return None
 
