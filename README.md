@@ -366,6 +366,37 @@ estágio de build.
 Repositório que não consome pacote privado não passa o secret, não declara o
 `--mount`, e nada muda: secret não consumido pelo BuildKit não emite nem aviso.
 
+### `liberar_pacotes.py` — os quatro pontos num comando
+
+O token faz falta em **quatro** lugares, e não em três: os do CI mais a máquina
+de quem escreve, onde o `npm install` também responde 401.
+
+```bash
+# o que falta, sem mudar nada. Sai 1 se faltar algo.
+python bin/liberar_pacotes.py --conferir --pacote @dono/pacote --repo dono/repo
+
+# conserta: pede o escopo que falta e grava o secret
+python bin/liberar_pacotes.py --aplicar  --pacote @dono/pacote --repo dono/repo
+```
+
+Ele pede `read:packages` ao `gh` (fluxo interativo, herdando o terminal — sem
+isso o código de uso único não apareceria), grava o `GH_PACKAGES_TOKEN` nos
+repositórios por **STDIN**, e imprime a linha de `export` da máquina local.
+Idempotente: rodar de novo não estraga nada.
+
+**O `--pacote` é o que dá valor à conferência.** Ter `read:packages` escrito na
+lista de escopos não é a mesma coisa que o registro aceitar o token — escopo
+revogado do lado do dono, token de organização sem acesso concedido ao
+repositório, ou nome de pacote errado dão os três a mesma aparência de "está
+tudo certo" e o mesmo 401 no `npm ci`. A prova é um GET no registro pedindo o
+pacote que o projeto instala de verdade.
+
+Por padrão o token que vai para o CI é o do próprio `gh`, que **morre junto com
+a autorização do gh** — `gh auth logout` ou revogar o app derruba o CI sem
+ninguém ter mexido nele. Para um token que não depende disso, crie um PAT com
+`read:packages` e só isso e passe `--de-arquivo`; é o mesmo formato que o
+`semear_secret.py` espera em `--de-diretorio`.
+
 ## Versão automática
 
 Ninguém escreve número de versão em lugar nenhum. A esteira lê os commits desde
