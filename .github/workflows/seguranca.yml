@@ -39,6 +39,16 @@ name: Seguranca
 #      leitura, passam a dividir o job com ela. O TruffleHog e de terceiro, mas
 #      fixado por SHA como tudo aqui, e nenhum passo recebe o token por `with:`.
 #
+# PORTAO QUE NAO MORDE
+# --------------------
+# O portao do Gitleaks (`bloquear: error`) nunca reprovou nada, desde que a
+# esteira existe: o Gitleaks 8.30.1 grava os achados SEM `level`, sem
+# `defaultConfiguration` e sem `security-severity`, e o `resumo_sarif.py` le
+# achado sem nivel como `warning`. Todo segredo virava "aviso" no painel. O
+# passo do Gitleaks agora marca cada achado como `error`: segredo no historico
+# e sempre acionavel (rotacionar), e o que for dado de teste vai para o
+# `.gitleaks.toml` do repositorio, por valor, com a justificativa.
+#
 # VARREDURA QUE NAO RODA TEM DE FALHAR
 # ------------------------------------
 # De 2026-09-13 a 2026-09-23 o Semgrep NAO varreu nada, em nenhum repositorio
@@ -322,6 +332,23 @@ jobs:
             exit 1
           fi
           echo "Gitleaks: $commits commits varridos."
+          # O 8.30.1 grava os achados sem nivel nenhum, e o resumo_sarif.py le
+          # isso como `warning` — abaixo do `bloquear: error` deste portao, que
+          # por isso nunca reprovou (ver "PORTAO QUE NAO MORDE" no cabecalho).
+          # Segredo no historico e sempre `error`. Dado de teste se declara no
+          # `.gitleaks.toml` do repositorio, que o Gitleaks le da raiz sozinho.
+          python3 - "$SAIDA/gitleaks.sarif" <<'PY'
+          import json, sys
+          caminho = sys.argv[1]
+          sarif = json.load(open(caminho, encoding="utf-8"))
+          n = 0
+          for run in sarif.get("runs", []):
+              for resultado in run.get("results", []):
+                  resultado["level"] = "error"
+                  n += 1
+          json.dump(sarif, open(caminho, "w", encoding="utf-8"))
+          print(f"Gitleaks: {n} achado(s), todos como error.")
+          PY
 
       - name: Segredo - TruffleHog
         if: ${{ !cancelled() && steps.preparar.outcome == 'success' }}
