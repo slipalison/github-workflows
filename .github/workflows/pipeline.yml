@@ -163,6 +163,18 @@ on:
         required: false
         type: string
         default: "auto"
+      seguranca_na_main:
+        description: >-
+          false: no push para a branch de producao, as varreduras NAO rodam de
+          novo — o pull request ja as rodou sobre a mesma arvore. So e verdade
+          com um ruleset que exija o PR ATUALIZADO com a branch antes do merge
+          (status check obrigatorio, modo estrito); sem ele, a arvore do merge
+          nunca foi varrida. `qualidade` e `sonar` continuam rodando: o
+          primeiro semeia na branch de producao o cache que todo PR herda, e o
+          segundo e a linha de base do "New Code".
+        required: false
+        type: boolean
+        default: true
 
       # ------------------------------------------------------------ publicar --
       app:
@@ -271,6 +283,13 @@ jobs:
       GH_PACKAGES_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
 
   seguranca:
+    # Pulado so num caso: push na branch de producao com `seguranca_na_main`
+    # desligado. E o UNICO jeito de este job sair `skipped` — por isso
+    # `publicar` e `lancar` podem aceitar `skipped` sem abrir outra porta.
+    if: >-
+      inputs.seguranca_na_main
+      || github.event_name != 'push'
+      || github.ref != format('refs/heads/{0}', inputs.branch_de_producao)
     permissions:
       contents: read
       security-events: write
@@ -289,14 +308,15 @@ jobs:
     # PULADO (sonar desligado, imagem vazia) conta como nao-sucesso e o deploy
     # nunca acontece; com `always()` sozinho, um job FALHO nao impediria nada.
     # Entao: roda sempre, e exige que nenhum dos cinco tenha falhado ou sido
-    # cancelado — pulado esta liberado, falho nao.
+    # cancelado — pulado esta liberado, falho nao. A `seguranca` so sai pulada
+    # por `seguranca_na_main` (ver o `if` dela).
     if: >-
       always()
       && inputs.app != ''
       && github.ref == format('refs/heads/{0}', inputs.branch_de_producao)
       && (needs.versao.result == 'success' || needs.versao.result == 'skipped')
       && needs.qualidade.result == 'success'
-      && needs.seguranca.result == 'success'
+      && (needs.seguranca.result == 'success' || needs.seguranca.result == 'skipped')
       && needs.imagem.result == 'success'
       && (needs.sonar.result == 'success' || needs.sonar.result == 'skipped')
     permissions:
@@ -324,7 +344,7 @@ jobs:
       && needs.versao.result == 'success'
       && needs.versao.outputs.salto != 'nenhum'
       && needs.qualidade.result == 'success'
-      && needs.seguranca.result == 'success'
+      && (needs.seguranca.result == 'success' || needs.seguranca.result == 'skipped')
       && (needs.imagem.result == 'success' || needs.imagem.result == 'skipped')
       && (needs.sonar.result == 'success' || needs.sonar.result == 'skipped')
       && (needs.publicar.result == 'success' || needs.publicar.result == 'skipped')
