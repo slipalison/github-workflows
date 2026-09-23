@@ -34,7 +34,7 @@ só, e repositório privado.
         ├─ qualidade  (N componentes, N jobs paralelos)
 push ───┼─ imagem     (build → varre → publica)          ─── portão ─── publicar ─── lancar
         ├─ sonar      (análise + Quality Gate)                          (GitOps)    (alias, tag, release)
-        └─ seguranca  (7 varreduras paralelas)                               só na main
+        └─ seguranca  (6 varreduras num job)                                 só na main
 ```
 
 O relógio é o do job mais lento, não a soma.
