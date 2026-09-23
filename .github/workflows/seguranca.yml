@@ -5,7 +5,7 @@ name: Seguranca
 #   SBOM                    lista do que entrou no build
 #   SCA                     dependencia vulneravel
 #   IaC                     Dockerfile, manifesto e chart — so com caminho_iac
-#   Semgrep                 SAST rapido, por padrao
+#   Semgrep                 SAST rapido, por padrao (`p/default` do registro)
 #   Gitleaks e TruffleHog   segredo, no historico inteiro
 #   CodeQL                  SAST profundo — DESLIGADO por padrao (ver o input),
 #                           job proprio, porque leva minutos e tem matriz
@@ -38,6 +38,19 @@ name: Seguranca
 #      upload de SARIF, e o Gitleaks e o TruffleHog, que antes rodavam so com
 #      leitura, passam a dividir o job com ela. O TruffleHog e de terceiro, mas
 #      fixado por SHA como tudo aqui, e nenhum passo recebe o token por `with:`.
+#
+# VARREDURA QUE NAO RODA TEM DE FALHAR
+# ------------------------------------
+# De 2026-09-13 a 2026-09-23 o Semgrep NAO varreu nada, em nenhum repositorio
+# da esteira, e o job ficou verde o tempo todo. `--config auto` exige metricas
+# ligadas, e o passo rodava com `--metrics=off`: o Semgrep saia com erro ("Cannot
+# create auto config when metrics are off"), o `|| true` engolia, nenhum SARIF
+# era escrito, e o `resumo_sarif.py` le arquivo ausente como "nada achado" — de
+# proposito, porque ha scanner que nao escreve arquivo quando nao acha nada.
+#
+# Por isso cada varredura que escreve SARIF confere o proprio resultado: saida
+# diferente de zero, SARIF ausente ou SARIF sem regra e FALHA do passo, com a
+# mensagem do que houve. "Nao rodou" nao pode passar por "nada achado".
 #
 # O QUE ESTE ARQUIVO CORRIGE
 # --------------------------
@@ -221,8 +234,8 @@ jobs:
       # ---------------------------------------------------------- Semgrep --
       - name: Instalar Semgrep
         if: ${{ !cancelled() && steps.preparar.outcome == 'success' }}
-        # Versao fixa: `pip install semgrep` traz regra nova sem commit, e uma
-        # regra nova reprova um pull request que nao mudou nada.
+        # Versao fixa: `pip install semgrep` traz motor novo sem commit, e um
+        # motor novo reprova um pull request que nao mudou nada.
         run: pip install --only-binary ':all:' semgrep==1.177.0
 
       - name: SAST - Semgrep
@@ -230,11 +243,42 @@ jobs:
         # Uma unica passada, SARIF. O simulator-ccb roda o semgrep DUAS vezes
         # (uma para JSON, outra para SARIF) para poder contar os achados — e a
         # contagem sai do proprio SARIF.
+        #
+        # `p/default`, e nao `auto`: `auto` exige metricas ligadas, e com
+        # `--metrics=off` o Semgrep nem comeca (ver "VARREDURA QUE NAO RODA" no
+        # cabecalho). `p/default` e o conjunto padrao do registro, independe de
+        # metrica, e aplica as regras das linguagens que acha no repositorio.
+        # Medido em 2026-09-23 com o 1.177.0: 1.074 regras no conjunto; 274
+        # aplicadas no basalto, 263 no coluna, 344 no demo-python.
+        #
+        # O que se aceita: as regras vem do registro (semgrep.dev) e mudam sem
+        # commit aqui, entao uma regra nova em `error` pode reprovar um PR que
+        # nao mudou nada. So `error` bloqueia (`bloquear_sast`), e copiar as
+        # regras para dentro deste repositorio, que e publico, esbarra na
+        # licenca delas (Semgrep Rules License), que restringe redistribuicao.
+        # Se o registro estiver fora do ar, o passo FALHA — que e o certo.
         run: |
           set -euo pipefail
-          configs=(--config auto)
+          configs=(--config p/default)
           if [ -d .semgrep ]; then configs+=(--config .semgrep/); fi
-          semgrep scan "${configs[@]}" --sarif --output "$SAIDA/semgrep.sarif" --metrics=off || true
+          # Achado NAO muda a saida (sem `--error`): quem decide e o portao do
+          # relatar-sarif. Saida diferente de zero e o Semgrep que nao rodou.
+          rc=0
+          semgrep scan "${configs[@]}" --sarif --output "$SAIDA/semgrep.sarif" --metrics=off || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::O Semgrep saiu com codigo $rc e NAO varreu (ver o log acima). Varredura que nao roda nao passa como 'nada achado'."
+            exit 1
+          fi
+          if [ ! -s "$SAIDA/semgrep.sarif" ]; then
+            echo "::error::O Semgrep saiu com 0 e nao escreveu o SARIF."
+            exit 1
+          fi
+          regras="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["runs"][0]["tool"]["driver"].get("rules", [])))' "$SAIDA/semgrep.sarif")"
+          if [ "$regras" -eq 0 ]; then
+            echo "::error::O SARIF do Semgrep veio sem nenhuma regra: a varredura nao testou nada."
+            exit 1
+          fi
+          echo "Semgrep: $regras regras no conjunto."
 
       # ---------------------------------------------------------- Segredos --
       # Por ultimo: olham o HISTORICO, e nao a arvore.
@@ -253,10 +297,31 @@ jobs:
           curl -sSfL --proto '=https' --tlsv1.2 \
             "https://github.com/gitleaks/gitleaks/releases/download/v${versao}/gitleaks_${versao}_linux_x64.tar.gz" \
             | tar -xz -C "$RUNNER_TEMP" gitleaks
-          # `|| true`: o gitleaks sai 1 quando acha algo, e quem decide se isso
-          # derruba o job e o portao do relatar-sarif, num lugar so.
+          # `--exit-code 0`: achar segredo nao muda a saida — quem decide se
+          # isso derruba o job e o portao do relatar-sarif, num lugar so. Entao
+          # saida diferente de zero e o Gitleaks que nao rodou. Ate 2026-09-23
+          # havia um `|| true` aqui, que so servia para esconder isso (ver
+          # "VARREDURA QUE NAO RODA" no cabecalho).
+          #
+          # Saida 0 com SARIF valido AINDA nao prova que ele varreu. Medido com
+          # o 8.30.1 fora de um repositorio git: loga `ERR [git] fatal: not a
+          # git repository`, varre 0 commits, diz "no leaks found", sai 0 e
+          # escreve um SARIF com as regras e nenhum resultado. Um clone raso ou
+          # um "dubious ownership" do git dariam o mesmo. A prova e a linha
+          # "N commits scanned" que ele mesmo imprime, com N maior que zero.
+          log="$RUNNER_TEMP/gitleaks.log"
           "$RUNNER_TEMP/gitleaks" detect --source . --report-format sarif \
-            --report-path "$SAIDA/gitleaks.sarif" --exit-code 0 || true
+            --report-path "$SAIDA/gitleaks.sarif" --exit-code 0 2>&1 | tee "$log"
+          if [ ! -s "$SAIDA/gitleaks.sarif" ]; then
+            echo "::error::O Gitleaks saiu com 0 e nao escreveu o SARIF."
+            exit 1
+          fi
+          commits="$(sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -oE '[0-9]+ commits scanned' | grep -oE '^[0-9]+' | tail -1)"
+          if [ "${commits:-0}" -eq 0 ]; then
+            echo "::error::O Gitleaks varreu ${commits:-0} commits (ver o log acima): sem historico, a varredura de segredo nao testou nada."
+            exit 1
+          fi
+          echo "Gitleaks: $commits commits varridos."
 
       - name: Segredo - TruffleHog
         if: ${{ !cancelled() && steps.preparar.outcome == 'success' }}
