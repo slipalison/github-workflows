@@ -97,8 +97,20 @@ import urllib.request
 from pathlib import Path
 
 ESTEIRA = Path(__file__).resolve().parent.parent
-CACHE = Path(os.environ.get("VALIDAR_LOCAL_CACHE", Path.home() / ".cache" / "validar-local"))
+# Fixo, e nao lido do ambiente: tudo o que este script apaga e reescreve mora
+# aqui, e um caminho vindo de fora poria essa limpeza em qualquer lugar.
+CACHE = Path.home() / ".cache" / "validar-local"
 REPO_ESTEIRA = "slipalison/github-workflows"
+DIR_GITHUB = ".github"
+DIR_CARGO = ".cargo"
+ACTION_YML = "action.yml"
+GLOB_YAML = "*.y*ml"
+REF_MAIN = "origin/main"
+
+# O que -W e -j aceitam: um nome de arquivo de workflow e um id de job. Nada
+# que nao case chega ao act.
+NOME_WORKFLOW = re.compile(r"[\w.-]+\.ya?ml")
+ID_JOB = re.compile(r"[\w.-]+")
 
 # Versao E sha256 fixos aqui, conferidos contra o checksums.txt de cada release
 # em 2026-09-24. Subir de versao e mudar as duas colunas.
@@ -233,13 +245,13 @@ def sandbox() -> Path:
         "\thelper = !gh auth git-credential\n"
     )
     # O runner do GitHub traz o rustup; esta maquina, dentro do sandbox, tambem.
-    if not (home / ".cargo" / "bin" / "rustup").exists():
+    if not (home / DIR_CARGO / "bin" / "rustup").exists():
         diz(f"{FRACO}instalando o rustup no sandbox (uma vez){FIM}")
         with urllib.request.urlopen("https://sh.rustup.rs", timeout=60) as resposta:
             script = resposta.read()
         ambiente = {
             **os.environ,
-            "CARGO_HOME": str(home / ".cargo"),
+            "CARGO_HOME": str(home / DIR_CARGO),
             "RUSTUP_HOME": str(home / ".rustup"),
         }
         subprocess.run(
@@ -296,7 +308,7 @@ def trocas() -> Path:
     )
     for sub in ("vazia", "codeql/upload-sarif", "codeql/init", "codeql/analyze"):
         (pasta / sub).mkdir(parents=True, exist_ok=True)
-        (pasta / sub / "action.yml").write_text(vazia)
+        (pasta / sub / ACTION_YML).write_text(vazia)
     return pasta
 
 
@@ -307,7 +319,7 @@ def trufflehog_limitado(sha: str) -> Path:
     OOM killer escolheu a sessao de quem chamou, quatro vezes (2026-09-24).
     Com o limite, estourar mata so o conteiner, e o passo falha dizendo."""
     destino = CACHE / "acoes" / f"trufflehog-{sha[:12]}"
-    alvo = destino / "action.yml"
+    alvo = destino / ACTION_YML
     if not alvo.exists():
         url = f"https://raw.githubusercontent.com/trufflesecurity/trufflehog/{sha}/action.yml"
         with urllib.request.urlopen(url, timeout=60) as resposta:  # noqa: S310 - SHA fixo
@@ -326,7 +338,7 @@ def trufflehog_limitado(sha: str) -> Path:
 def upload_v4() -> Path:
     tag, sha = UPLOAD_V4
     destino = CACHE / "acoes" / f"upload-artifact-{tag}"
-    if not (destino / "action.yml").exists():
+    if not (destino / ACTION_YML).exists():
         shutil.rmtree(destino, ignore_errors=True)
         git(
             "clone",
@@ -386,7 +398,12 @@ def sem_publicar(raiz: Path) -> int:
     workflows vira `push: false` na COPIA da esteira: a imagem e construida e
     varrida do mesmo jeito, e nao sai da maquina."""
     trocas_feitas = 0
-    for arquivo in (raiz / ".github").rglob("*.y*ml"):
+    base = raiz.resolve()
+    for arquivo in (raiz / DIR_GITHUB).rglob(GLOB_YAML):
+        # So o que resolve para DENTRO da copia: um link simbolico na esteira
+        # que apontasse para fora faria esta reescrita mexer onde nao deve.
+        if arquivo.is_symlink() or not arquivo.resolve().is_relative_to(base):
+            continue
         texto = arquivo.read_text()
         if "strategy:" in texto:
             arquivo.write_text(um_por_vez(texto))
@@ -417,7 +434,7 @@ def esteira(local: bool) -> Path:
     else:
         git("fetch", "--quiet", "origin", "main", cwd=ESTEIRA)
         arquivo = subprocess.run(
-            ["git", "archive", "origin/main"], cwd=ESTEIRA, capture_output=True, check=True
+            ["git", "archive", REF_MAIN], cwd=ESTEIRA, capture_output=True, check=True
         ).stdout
         with tempfile.TemporaryDirectory() as tmp:
             pacote = Path(tmp) / "esteira.tar"
@@ -464,7 +481,7 @@ def shas(pastas: list[Path]) -> dict[str, set[str]]:
     achados: dict[str, set[str]] = {nome: set() for nome in TROCADAS}
     padrao = re.compile(r"uses:\s*([\w.-]+/[\w.-]+)(?:/[\w./-]+)?@([0-9a-f]{40})")
     for pasta in pastas:
-        for arquivo in pasta.rglob("*.y*ml"):
+        for arquivo in pasta.rglob(GLOB_YAML):
             if ".git" in arquivo.parts:
                 continue
             for repo, sha in padrao.findall(arquivo.read_text(errors="replace")):
@@ -481,46 +498,56 @@ def refs_da_esteira(arquivos: list[Path]) -> set[str]:
 # ------------------------------------------------------------------- segredos
 
 
-def segredos(repo: Path, arquivos: list[Path]) -> tuple[dict[str, str], dict[str, list[str]]]:
+def pedidos_de_segredo(arquivos: list[Path]) -> dict[str, list[str]]:
+    """Cada `secrets.NOME` dos workflows, com os arquivos que o pedem."""
     pedidos: dict[str, list[str]] = {}
     for arquivo in arquivos:
-        for nome in re.findall(r"secrets\.([A-Za-z_][A-Za-z0-9_]*)", arquivo.read_text()):
-            if nome != "GITHUB_TOKEN":
-                pedidos.setdefault(nome, [])
-                if arquivo.name not in pedidos[nome]:
-                    pedidos[nome].append(arquivo.name)
+        for nome in re.findall(r"secrets\.([A-Za-z_]\w*)", arquivo.read_text()):
+            onde = pedidos.setdefault(nome, [])
+            if nome != "GITHUB_TOKEN" and arquivo.name not in onde:
+                onde.append(arquivo.name)
+    pedidos.pop("GITHUB_TOKEN", None)
+    return pedidos
 
-    # Os arquivos do repositorio sao lidos pelo bash, porque e bash que os
-    # escreve (o basalto grava com `printf %q`). O valor vem pelo stdout de um
-    # processo filho, e nunca aparece na tela nem num argumento.
-    valores: dict[str, str] = {}
+
+def valores_dos_envs(repo: Path, pedidos: dict[str, list[str]]) -> dict[str, str]:
+    """Os arquivos `~/.config/<repositorio>/*.env`, lidos pelo bash, porque e
+    bash que os escreve (o basalto grava com `printf %q`). O valor vem pelo
+    stdout de um processo filho, e nunca aparece na tela nem num argumento."""
     pasta = Path.home() / ".config" / repo.name
     envs = sorted(pasta.glob("*.env")) if pasta.is_dir() else []
-    if envs:
-        leitura = subprocess.run(
-            [
-                "bash",
-                "-c",
-                'set -a; for f in "$@"; do . "$f"; done; '
-                'python3 -c "import json,os; print(json.dumps(dict(os.environ)))"',
-                "ler",
-                *map(str, envs),
-            ],
-            capture_output=True,
-            text=True,
-            env={"PATH": os.environ["PATH"], "HOME": str(Path.home())},
-            check=True,
-        )
-        do_arquivo = json.loads(leitura.stdout)
-        valores.update({k: v for k, v in do_arquivo.items() if k in pedidos})
+    if not envs:
+        return {}
+    leitura = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'set -a; for f in "$@"; do . "$f"; done; '
+            'python3 -c "import json,os; print(json.dumps(dict(os.environ)))"',
+            "ler",
+            *map(str, envs),
+        ],
+        capture_output=True,
+        text=True,
+        env={"PATH": os.environ["PATH"], "HOME": str(Path.home())},
+        check=True,
+    )
+    return {k: v for k, v in json.loads(leitura.stdout).items() if k in pedidos}
+
+
+def token_do_gh() -> str:
+    return (
+        os.environ.get("NODE_AUTH_TOKEN")
+        or subprocess.run(["gh", "auth", "token"], capture_output=True, text=True).stdout.strip()
+    )
+
+
+def segredos(repo: Path, arquivos: list[Path]) -> tuple[dict[str, str], dict[str, list[str]]]:
+    pedidos = pedidos_de_segredo(arquivos)
+    valores = valores_dos_envs(repo, pedidos)
     valores.update({k: os.environ[k] for k in pedidos if os.environ.get(k)})
     if "GH_PACKAGES_TOKEN" in pedidos and "GH_PACKAGES_TOKEN" not in valores:
-        token = (
-            os.environ.get("NODE_AUTH_TOKEN")
-            or subprocess.run(
-                ["gh", "auth", "token"], capture_output=True, text=True
-            ).stdout.strip()
-        )
+        token = token_do_gh()
         if token:
             valores["GH_PACKAGES_TOKEN"] = token
     if "GITOPS_SSH_KEY" in pedidos:
@@ -547,7 +574,7 @@ def lint(actionlint: Path, repo: Path) -> bool:
     de agora, e a comparacao e pelo texto do achado, sem o numero da linha
     (qualquer linha acrescentada acima desloca todos os de baixo).
     """
-    base = git("merge-base", "origin/main", "HEAD", cwd=repo, verificar=False) or "origin/main"
+    base = git("merge-base", REF_MAIN, "HEAD", cwd=repo, verificar=False) or REF_MAIN
     nomes = set(git("diff", "--name-only", base, "--", ".github/workflows", cwd=repo).split())
     nomes |= set(
         git("ls-files", "--others", "--exclude-standard", ".github/workflows", cwd=repo).split()
@@ -620,7 +647,7 @@ def copia_do_repo(repo: Path) -> Path:
 
 def evento(repo: Path, destino: Path) -> Path:
     cabeca = git("rev-parse", "HEAD", cwd=repo)
-    base = git("rev-parse", "origin/main", cwd=repo)
+    base = git("rev-parse", REF_MAIN, cwd=repo)
     nome = git("config", "--get", "remote.origin.url", cwd=repo)
     dono_repo = re.sub(r"(\.git)?$", "", nome.split("github.com")[-1].lstrip(":/"))
     dono, _, curto = dono_repo.partition("/")
@@ -675,7 +702,7 @@ def esperar_apt(limite_s: int = 900) -> None:
         time.sleep(10)
 
 
-LINHA_JOB = re.compile(r"^\[(?P<job>[^\]]+?)\s*\]\s+(?P<resto>.*)$")
+LINHA_JOB = re.compile(r"^\[(?P<job>[^\]]+)\]\s+(?P<resto>.*)$")
 
 
 def rodar_act(
@@ -694,7 +721,7 @@ def rodar_act(
         **segredos_val,
         "HOME": str(home),
         "GH_CONFIG_DIR": str(Path.home() / ".config" / "gh"),
-        "CARGO_HOME": str(home / ".cargo"),
+        "CARGO_HOME": str(home / DIR_CARGO),
         "RUSTUP_HOME": str(home / ".rustup"),
         # O runner do GitHub deixa o pip instalar; o Debian recusa sem isto.
         "PIP_BREAK_SYSTEM_PACKAGES": "1",
@@ -704,7 +731,7 @@ def rodar_act(
         "CARGO_BUILD_JOBS": os.environ.get("CARGO_BUILD_JOBS", "2"),
         "PATH": os.pathsep.join(
             [
-                str(home / ".cargo" / "bin"),
+                str(home / DIR_CARGO / "bin"),
                 str(home / ".local" / "bin"),
                 str(CACHE / "bin"),
                 os.environ["PATH"],
@@ -783,7 +810,7 @@ def registro(repo: Path) -> Path:
     return Path(git("rev-parse", "--absolute-git-dir", cwd=repo)) / "validar-local"
 
 
-def main() -> int:
+def argumentos() -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         description=__doc__.split("\n\n")[0],
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -794,29 +821,31 @@ def main() -> int:
     ap.add_argument("--esteira-local", action="store_true", help="usa a esteira desta maquina")
     ap.add_argument("--listar", action="store_true", help="mostra o que rodaria e sai")
     ap.add_argument("--status", action="store_true", help="o HEAD ja passou?")
-    args = ap.parse_args()
+    return ap.parse_args()
 
-    try:
-        repo = Path(git("rev-parse", "--show-toplevel"))
-    except RuntimeError:
-        return falha("rode dentro de um repositorio git")
-    arvore = git("rev-parse", "HEAD^{tree}", cwd=repo)
-    antes = git("status", "--porcelain", cwd=repo)
-    suja = bool(antes)
 
-    if args.status:
-        marca = registro(repo) / arvore
-        if marca.exists():
-            diz(f"{VERDE}validado{FIM}: {marca.read_text().strip()}")
-            return 0
-        diz(f"{AMARELO}nao validado{FIM}: a arvore do HEAD ({arvore[:12]}) nunca passou aqui")
-        return 1
+def argumento_invalido(args: argparse.Namespace) -> str | None:
+    """-W e um nome de arquivo em .github/workflows, e -j um id de job: o que
+    nao casar nao chega ao act (nem vira caminho fora da pasta)."""
+    for nome in args.workflow or []:
+        if not NOME_WORKFLOW.fullmatch(nome):
+            return f"-W espera o nome de um arquivo de .github/workflows, e nao {nome!r}"
+    if args.job is not None and not ID_JOB.fullmatch(args.job):
+        return f"-j espera o id de um job, e nao {args.job!r}"
+    return None
 
-    pasta_wf = repo / ".github" / "workflows"
-    todos = sorted([*pasta_wf.glob("*.yml"), *pasta_wf.glob("*.yaml")])
-    if not todos:
-        return falha(f"{repo.name} nao tem .github/workflows")
 
+def mostrar_status(repo: Path, arvore: str) -> int:
+    marca = registro(repo) / arvore
+    if marca.exists():
+        diz(f"{VERDE}validado{FIM}: {marca.read_text().strip()}")
+        return 0
+    diz(f"{AMARELO}nao validado{FIM}: a arvore do HEAD ({arvore[:12]}) nunca passou aqui")
+    return 1
+
+
+def maquina_pronta() -> str | None:
+    """None se a maquina aguenta; senao, o que falta."""
     # Se a memoria acabar, que o kernel mate a VALIDACAO, e nao a sessao de
     # quem a chamou: o score passa para os filhos (act, cargo, semgrep). Medido
     # em 2026-09-24, numa maquina de 4 GB, o OOM killer escolheu a sessao do
@@ -832,117 +861,55 @@ def main() -> int:
         )
     faltam_runner = falta_do_runner()
     if faltam_runner:
-        return falha(
+        return (
             "falta nesta maquina o que o runner do GitHub traz: "
             + "; ".join(faltam_runner)
             + ". No Debian: sudo apt install python3-yaml jq zstd unzip"
         )
+    return None
 
-    CACHE.mkdir(parents=True, exist_ok=True)
-    trava = (CACHE / "trava").open("w")
-    try:
-        fcntl.flock(trava, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        return falha("outro validar-local esta rodando (os dois disputariam Docker e portas)")
 
-    yq = ferramenta("yq")
+def escolher(args: argparse.Namespace, pasta_wf: Path, todos: list[Path]) -> list[Path] | str:
     if args.workflow:
         escolhidos = [pasta_wf / w for w in args.workflow]
         faltando = [str(w) for w in escolhidos if not w.exists()]
         if faltando:
-            return falha(f"workflow nao existe: {', '.join(faltando)}")
-    else:
-        escolhidos = [w for w in todos if "pull_request" in gatilhos(ler(yq, w))]
-    if not escolhidos:
-        return falha("nenhum workflow roda em pull_request")
+            return f"workflow nao existe: {', '.join(faltando)}"
+        return escolhidos
+    yq = ferramenta("yq")
+    escolhidos = [w for w in todos if "pull_request" in gatilhos(ler(yq, w))]
+    return escolhidos or "nenhum workflow roda em pull_request"
 
-    refs = refs_da_esteira(escolhidos) - {"main"}
-    if refs:
-        return falha(
-            f"a esteira e chamada em {', '.join(sorted(refs))}, e nao em @main: as actions que "
-            "ela traz nesse ref nao estao mapeadas, e o harden-runner rodaria nesta maquina"
-        )
 
-    git("fetch", "--quiet", "origin", "main", cwd=repo, verificar=False)
-    raiz_esteira = esteira(args.esteira_local)
-    # Quem chama a esteira repassa cada segredo pelo nome (`secrets:`), entao os
-    # pedidos sao os dos workflows escolhidos.
-    valores, faltam = segredos(repo, escolhidos)
-
-    diz(f"validar-local em {repo.name} ({git('branch', '--show-current', cwd=repo) or 'HEAD'})")
-    diz(
-        f"  workflows: {', '.join(w.name for w in escolhidos)}"
-        + (f"  job: {args.job}" if args.job else "")
-    )
-    diz(f"  esteira:   {'esta maquina, como esta' if args.esteira_local else 'origin/main'}")
-    diz(
-        "  trocadas:  harden-runner, codeql-action, docker/login-action; Sonar desligado;"
-        " nada e publicado (push: false)"
-    )
-    if faltam:
-        for nome, onde in sorted(faltam.items()):
-            diz(f"  {AMARELO}sem valor local{FIM}: {nome} (pedido em {', '.join(onde)})")
-    if args.listar:
-        return 0
-
-    inicio = time.monotonic()
-    ok = lint(ferramenta("actionlint"), repo)
-    act = ferramenta("act")
-    home = sandbox()
-    python_no_cache_de_ferramentas(home)
-    pasta_trocas = trocas()
-    mapa = [f"{REPO_ESTEIRA}@main={raiz_esteira}"]
-    pastas = [repo / ".github", raiz_esteira / ".github"]
-    padrao_upload = re.compile(r"uses:\s*actions/upload-artifact@([0-9a-f]{40})")
-    novos_upload = {
+def shas_de(pastas: list[Path], acao: str) -> set[str]:
+    padrao = re.compile(rf"uses:\s*{re.escape(acao)}@([0-9a-f]{{40}})")
+    return {
         sha
         for pasta in pastas
-        for arq in pasta.rglob("*.y*ml")
-        for sha in padrao_upload.findall(arq.read_text(errors="replace"))
-        if sha != UPLOAD_V4[1]
+        for arq in pasta.rglob(GLOB_YAML)
+        for sha in padrao.findall(arq.read_text(errors="replace"))
     }
+
+
+def mapa_de_acoes(repo: Path, raiz_esteira: Path) -> list[str]:
+    """O `--local-repository` de cada action trocada, e da propria esteira."""
+    pasta_trocas = trocas()
+    mapa = [f"{REPO_ESTEIRA}@main={raiz_esteira}"]
+    pastas = [repo / DIR_GITHUB, raiz_esteira / DIR_GITHUB]
+    novos_upload = shas_de(pastas, "actions/upload-artifact") - {UPLOAD_V4[1]}
     if novos_upload:
         v4 = upload_v4()
         mapa += [f"actions/upload-artifact@{sha}={v4}" for sha in sorted(novos_upload)]
-    padrao_th = re.compile(r"uses:\s*trufflesecurity/trufflehog@([0-9a-f]{40})")
-    for sha in sorted(
-        {
-            sha
-            for pasta in pastas
-            for arq in pasta.rglob("*.y*ml")
-            for sha in padrao_th.findall(arq.read_text(errors="replace"))
-        }
-    ):
+    for sha in sorted(shas_de(pastas, "trufflesecurity/trufflehog")):
         mapa.append(f"trufflesecurity/trufflehog@{sha}={trufflehog_limitado(sha)}")
     for repo_acao, conjunto in shas(pastas).items():
         alvo = pasta_trocas / ("codeql" if repo_acao == "github/codeql-action" else "vazia")
         mapa += [f"{repo_acao}@{sha}={alvo}" for sha in sorted(conjunto)]
+    return mapa
 
-    resultado: dict[str, dict[str, str]] = {}
-    logs = CACHE / "logs"
-    logs.mkdir(exist_ok=True)
-    carimbo = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    with tempfile.TemporaryDirectory(prefix="validar-local-") as tmp:
-        tmp_path = Path(tmp)
-        ev = evento(repo, tmp_path)
-        copia = copia_do_repo(repo)
-        for workflow in escolhidos:
-            derivado, sem_sonar = derivar(workflow, tmp_path)
-            log = logs / f"{repo.name}-{carimbo}-{workflow.stem}.log"
-            diz(f"\n{workflow.name}{' (Sonar desligado)' if sem_sonar else ''} — log em {log}")
-            resultado[workflow.name] = rodar_act(
-                act, copia, derivado, args.job, home, mapa, ev, valores, log
-            )
 
-    minutos = (time.monotonic() - inicio) / 60
-    # O act roda numa copia do repositorio, e o que ele fizer nao pode aparecer
-    # aqui. Se aparecer, e defeito deste script ou de um passo, e a arvore que
-    # vai para o PR nao e mais a que foi validada.
-    depois = git("status", "--porcelain", cwd=repo)
-    if depois != antes:
-        novos = sorted(set(depois.splitlines()) - set(antes.splitlines()))
-        diz(f"{VERMELHO}a rodada mexeu na arvore{FIM}: {', '.join(novos) or depois}")
-        ok = False
+def resumir(resultado: dict[str, dict[str, str]], minutos: float) -> bool:
+    ok = True
     diz("\nResumo")
     for nome, jobs in resultado.items():
         if jobs.pop("(apt ocupado)", None):
@@ -958,10 +925,12 @@ def main() -> int:
         )
         ok = ok and not ruins and bool(jobs)
     diz(f"  {minutos:.1f} min nesta maquina; o Sonar so o CI mede.")
+    return ok
 
-    if not ok:
-        diz(f"\n{VERMELHO}REPROVADO{FIM}: conserte aqui antes de empurrar.")
-        return 1
+
+def concluir(
+    repo: Path, arvore: str, args: argparse.Namespace, suja: bool, feito: str, minutos: float
+) -> int:
     if args.job or args.workflow:
         diz(f"\n{VERDE}verde{FIM} no que foi pedido — sem registro: antes do PR, rode tudo.")
     elif suja:
@@ -970,11 +939,121 @@ def main() -> int:
         pasta = registro(repo)
         pasta.mkdir(exist_ok=True)
         (pasta / arvore).write_text(
-            f"{dt.datetime.now().isoformat(timespec='seconds')} "
-            f"{', '.join(resultado)} em {minutos:.1f} min\n"
+            f"{dt.datetime.now().isoformat(timespec='seconds')} {feito} em {minutos:.1f} min\n"
         )
         diz(f"\n{VERDE}VERDE{FIM}: a arvore {arvore[:12]} passou; registrado.")
     return 0
+
+
+def cabecalho(repo: Path, escolhidos: list[Path], args: argparse.Namespace) -> None:
+    diz(f"validar-local em {repo.name} ({git('branch', '--show-current', cwd=repo) or 'HEAD'})")
+    diz(
+        f"  workflows: {', '.join(w.name for w in escolhidos)}"
+        + (f"  job: {args.job}" if args.job else "")
+    )
+    diz(f"  esteira:   {'esta maquina, como esta' if args.esteira_local else REF_MAIN}")
+    diz(
+        "  trocadas:  harden-runner, codeql-action, docker/login-action; Sonar desligado;"
+        " nada e publicado (push: false)"
+    )
+
+
+def rodar_workflows(
+    repo: Path,
+    escolhidos: list[Path],
+    args: argparse.Namespace,
+    raiz_esteira: Path,
+    valores: dict[str, str],
+) -> dict[str, dict[str, str]]:
+    act = ferramenta("act")
+    home = sandbox()
+    python_no_cache_de_ferramentas(home)
+    mapa = mapa_de_acoes(repo, raiz_esteira)
+    resultado: dict[str, dict[str, str]] = {}
+    logs = CACHE / "logs"
+    logs.mkdir(exist_ok=True)
+    carimbo = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    with tempfile.TemporaryDirectory(prefix="validar-local-") as tmp:
+        tmp_path = Path(tmp)
+        ev = evento(repo, tmp_path)
+        copia = copia_do_repo(repo)
+        for workflow in escolhidos:
+            derivado, sem_sonar = derivar(workflow, tmp_path)
+            log = logs / f"{repo.name}-{carimbo}-{workflow.stem}.log"
+            diz(f"\n{workflow.name}{' (Sonar desligado)' if sem_sonar else ''} — log em {log}")
+            resultado[workflow.name] = rodar_act(
+                act, copia, derivado, args.job, home, mapa, ev, valores, log
+            )
+    return resultado
+
+
+def main() -> int:
+    args = argumentos()
+    invalido = argumento_invalido(args)
+    if invalido:
+        return falha(invalido)
+    try:
+        repo = Path(git("rev-parse", "--show-toplevel"))
+    except RuntimeError:
+        return falha("rode dentro de um repositorio git")
+    arvore = git("rev-parse", "HEAD^{tree}", cwd=repo)
+    antes = git("status", "--porcelain", cwd=repo)
+    if args.status:
+        return mostrar_status(repo, arvore)
+
+    pasta_wf = repo / DIR_GITHUB / "workflows"
+    todos = sorted([*pasta_wf.glob("*.yml"), *pasta_wf.glob("*.yaml")])
+    if not todos:
+        return falha(f"{repo.name} nao tem .github/workflows")
+    problema = maquina_pronta()
+    if problema:
+        return falha(problema)
+
+    CACHE.mkdir(parents=True, exist_ok=True)
+    trava = (CACHE / "trava").open("w")
+    try:
+        fcntl.flock(trava, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return falha("outro validar-local esta rodando (os dois disputariam Docker e portas)")
+
+    escolhidos = escolher(args, pasta_wf, todos)
+    if isinstance(escolhidos, str):
+        return falha(escolhidos)
+    refs = refs_da_esteira(escolhidos) - {"main"}
+    if refs:
+        return falha(
+            f"a esteira e chamada em {', '.join(sorted(refs))}, e nao em @main: as actions que "
+            "ela traz nesse ref nao estao mapeadas, e o harden-runner rodaria nesta maquina"
+        )
+
+    git("fetch", "--quiet", "origin", "main", cwd=repo, verificar=False)
+    raiz_esteira = esteira(args.esteira_local)
+    # Quem chama a esteira repassa cada segredo pelo nome (`secrets:`), entao os
+    # pedidos sao os dos workflows escolhidos.
+    valores, faltam = segredos(repo, escolhidos)
+    cabecalho(repo, escolhidos, args)
+    for nome, onde in sorted(faltam.items()):
+        diz(f"  {AMARELO}sem valor local{FIM}: {nome} (pedido em {', '.join(onde)})")
+    if args.listar:
+        return 0
+
+    inicio = time.monotonic()
+    ok = lint(ferramenta("actionlint"), repo)
+    resultado = rodar_workflows(repo, escolhidos, args, raiz_esteira, valores)
+    minutos = (time.monotonic() - inicio) / 60
+    # O act roda numa copia do repositorio, e o que ele fizer nao pode aparecer
+    # aqui. Se aparecer, e defeito deste script ou de um passo, e a arvore que
+    # vai para o PR nao e mais a que foi validada.
+    depois = git("status", "--porcelain", cwd=repo)
+    if depois != antes:
+        novos = sorted(set(depois.splitlines()) - set(antes.splitlines()))
+        diz(f"{VERMELHO}a rodada mexeu na arvore{FIM}: {', '.join(novos) or depois}")
+        ok = False
+    ok = resumir(resultado, minutos) and ok
+    if not ok:
+        diz(f"\n{VERMELHO}REPROVADO{FIM}: conserte aqui antes de empurrar.")
+        return 1
+    return concluir(repo, arvore, args, bool(antes), ", ".join(resultado), minutos)
 
 
 if __name__ == "__main__":
