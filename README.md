@@ -66,6 +66,26 @@ O paralelismo não encurtou o que já existia — ele absorveu o que faltava. Es
 O job `imagem` sozinho subiu de 43s para 79s, de propósito: ele agora constrói,
 varre e **só então** publica.
 
+### A tag de preview: `pr-<número>-<7 do head>`
+
+Num pull request, a imagem sai com **dois nomes para o mesmo digest**:
+`sha-<merge commit>` e `pr-<número>-<7 primeiros do SHA do head do PR>`. O
+segundo existe para o ambiente de preview do cluster (o ApplicationSet
+`previews` do `homelab-gitops`, desenho em
+`distros-setup/proxmox/PLANO-PREVIEW.md`): o gerador de pull request do ArgoCD
+só conhece o SHA do head, e o `sha-` do PR é o do merge commit que o GitHub
+monta. Sem um nome que os dois lados sabem calcular, o preview pediria uma tag
+que não existe.
+
+Duas coisas que valem saber:
+
+- **O preview roda o merge commit**, não o head sozinho — é o que entra na
+  `main` se o PR for aceito;
+- **a frase de cima deixa de valer para esta tag**: o `imagem` corre em
+  paralelo com os testes, então um preview pode subir com código que a
+  `qualidade` reprovou. É o comportamento desejado num ambiente de validação;
+  o que continua barrando é o portão do Trivy, que vem **antes** do push.
+
 ---
 
 ## O que veio da análise dos dois repositórios

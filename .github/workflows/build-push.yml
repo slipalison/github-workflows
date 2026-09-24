@@ -90,11 +90,36 @@ jobs:
         id: meta
         env:
           PLATAFORMAS: ${{ inputs.platforms }}
+          IMAGEM: ${{ inputs.image }}
+          PR_NUMERO: ${{ github.event.pull_request.number }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           # sha-<7> e reproduzivel e diz de onde veio. `latest` nao diz nada, nao
           # permite rollback, e o Kyverno recusa no cluster.
-          echo "tag=sha-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+          tag="sha-$(git rev-parse --short=7 HEAD)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          # AMBIENTE DE PREVIEW. Num pull request a imagem ganha um segundo nome,
+          # `pr-<numero>-<7 do head do PR>`, apontando para o MESMO digest.
+          #
+          # Por que nao basta o sha-: aqui o HEAD e o merge commit que o GitHub
+          # monta (PR + base), e o gerador de pull request do ArgoCD so conhece o
+          # SHA do HEAD DO PR. Sem um nome que os dois lados saibam calcular, o
+          # ApplicationSet `previews` do homelab-gitops pediria uma tag que nao
+          # existe. O conteudo continua sendo o do merge commit — e o que vai
+          # para a main se o PR entrar, que e o que vale validar.
+          #
+          # Imutavel na pratica: cada push no PR muda o head, e com ele a tag.
+          # Nenhum `pr-<N>` sem o sha, que seria reescrito a cada push e deixaria
+          # o kubelet com a copia velha em cache (IfNotPresent).
+          {
+            echo "tags<<FIM_DAS_TAGS"
+            echo "$IMAGEM:$tag"
+            if [ -n "$PR_NUMERO" ] && [ -n "$PR_HEAD" ]; then
+              echo "$IMAGEM:pr-$PR_NUMERO-${PR_HEAD:0:7}"
+            fi
+            echo "FIM_DAS_TAGS"
+          } >> "$GITHUB_OUTPUT"
           # O SHA completo sai do MESMO HEAD que gerou a tag, e nao de
           # `github.sha`: num pull_request o checkout aponta para o merge
           # commit, e os dois divergiriam — a imagem diria ter vindo de um
@@ -155,7 +180,7 @@ jobs:
           file: ${{ inputs.dockerfile }}
           platforms: ${{ inputs.platforms }}
           push: true
-          tags: ${{ inputs.image }}:${{ steps.meta.outputs.tag }}
+          tags: ${{ steps.meta.outputs.tags }}
           build-args: |
             GIT_SHA=${{ steps.meta.outputs.sha }}
           # Secret do BuildKit, e nao `build-arg`. O valor e montado em
@@ -245,7 +270,7 @@ jobs:
           file: ${{ inputs.dockerfile }}
           platforms: ${{ inputs.platforms }}
           push: true
-          tags: ${{ inputs.image }}:${{ steps.meta.outputs.tag }}
+          tags: ${{ steps.meta.outputs.tags }}
           # IDENTICO ao passo de construcao, e nao por simetria: um build-arg
           # diferente muda o layer, erra o cache e produz uma imagem OUTRA. O
           # Trivy teria varrido uma e o GHCR receberia a outra — o portao
