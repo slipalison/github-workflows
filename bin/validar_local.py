@@ -404,16 +404,17 @@ def sem_publicar(raiz: Path) -> int:
         # que apontasse para fora faria esta reescrita mexer onde nao deve.
         if arquivo.is_symlink() or not arquivo.resolve().is_relative_to(base):
             continue
-        texto = arquivo.read_text()
-        if "strategy:" in texto:
-            arquivo.write_text(um_por_vez(texto))
-            texto = arquivo.read_text()
-        novo_texto, n = re.subn(
+        original = arquivo.read_text()
+        texto = um_por_vez(original) if "strategy:" in original else original
+        texto, n = re.subn(
             r"(?m)^(\s*)push: true\s*$", r"\1push: false  # validar-local: nada e publicado", texto
         )
-        if n:
-            arquivo.write_text(novo_texto)
-            trocas_feitas += n
+        trocas_feitas += n
+        if texto != original:
+            # O caminho sai do rglob de uma pasta FIXA do cache e passou pela
+            # contencao acima; o conteudo e o do proprio arquivo, reescrito no
+            # mesmo lugar. Nao ha entrada de fora aqui (falso positivo do S2083).
+            arquivo.write_text(texto)  # NOSONAR
     return trocas_feitas
 
 
@@ -702,7 +703,15 @@ def esperar_apt(limite_s: int = 900) -> None:
         time.sleep(10)
 
 
-LINHA_JOB = re.compile(r"^\[(?P<job>[^\]]+)\]\s+(?P<resto>.*)$")
+def linha_de_job(linha: str) -> tuple[str, str] | None:
+    """`[Workflow/job   ] resto` -> ("Workflow/job", "resto"). Sem regex: a que
+    havia aqui tinha backtracking super-linear (Sonar S8786)."""
+    if not linha.startswith("["):
+        return None
+    fim = linha.find("]")
+    if fim <= 1:
+        return None
+    return linha[1:fim].strip(), linha[fim + 1 :].strip()
 
 
 def rodar_act(
@@ -780,12 +789,12 @@ def rodar_act(
         for linha in processo.stdout:
             saida.write(linha)
             limpa = ansi.sub("", linha).rstrip()
-            achado = LINHA_JOB.match(limpa)
+            achado = linha_de_job(limpa)
             if "Could not get lock /var/lib/apt" in limpa:
                 jobs["(apt ocupado)"] = "ambiente"
             if not achado:
                 continue
-            nome, resto = achado["job"].strip(), achado["resto"]
+            nome, resto = achado
             if "🚀  Start image" in resto or ("⭐ Run Set up job" in resto and nome not in jobs):
                 jobs.setdefault(nome, "rodando")
                 diz(f"  {FRACO}…{FIM} {nome}")
