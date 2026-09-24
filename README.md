@@ -529,6 +529,68 @@ escrito à mão, e nenhum commit de bot na `main`.
 
 ---
 
+## Rodar a esteira na sua máquina antes do PR (`validar-local`)
+
+Num repositório **privado**, todo minuto de runner sai da cota da conta, e o
+GitHub cobra cada job em minuto cheio — um job de 5 s custa 1 min. Esta esteira
+é pública, mas roda **na conta de quem a chama**. Em setembro de 2026 a cota Free
+(2.000 min/mês) acabou no dia 23: cada push num PR aberto do `basalto` custava
+~52 min, e 21% do que se gastou foi em runs que falharam — erro que dava para
+ver antes do push.
+
+[`bin/validar_local.py`](bin/validar_local.py) roda, na sua máquina, os
+workflows que o PR vai rodar — **os próprios**, e não uma cópia dos passos:
+
+```bash
+cd meu-repositorio
+python3 /caminho/para/github-workflows/bin/validar_local.py            # tudo o que roda em pull_request
+python3 /caminho/para/github-workflows/bin/validar_local.py -W e2e.yml # um workflow
+python3 /caminho/para/github-workflows/bin/validar_local.py --status   # o HEAD já passou?
+```
+
+- **O mesmo YAML.** Ele usa o [`act`](https://github.com/nektos/act) em modo
+  host: cada `run:` executa aqui, com expressões, `if:`, matrizes, as actions de
+  terceiro e os workflows reutilizáveis desta esteira. A esteira é a `main` de
+  `origin` (o `@main` que o CI usa); `--esteira-local` usa a sua cópia, para
+  validar uma mudança **aqui** antes do PR dela.
+- **Fica de fora só o que é do GitHub**, e cada um vira uma action vazia:
+  - `harden-runner` — em modo host ele instalaria um agente de rede na sua máquina;
+  - `codeql-action` — manda SARIF para a aba Security;
+  - `docker/login-action` — sem `GITHUB_TOKEN` aqui, e o PR não publica imagem;
+  - o **Sonar** — a análise é do SonarCloud, e só o CI a mede;
+  - a **publicação da imagem** — o job `imagem` publica `sha-<commit>` no GHCR
+    até no PR; na cópia da esteira que ele monta, todo `push: true` vira
+    `push: false`. A imagem é construída e varrida pelo Trivy do mesmo jeito.
+- **Três diferenças do runner que ele cobre:** o `upload-artifact` depois da v4
+  vira a v4.6.2 (a API nova não existe no servidor do `act`); o Python do
+  sistema vai para o *tool cache* (o `setup-python` só tem binário para Ubuntu);
+  e o servidor de cache escuta na `docker0`, porque o `cache-to: type=gha` do
+  build roda dentro do contêiner do BuildKit.
+- **O TruffleHog com teto de memória.** É a mesma action, no mesmo SHA, com
+  `--memory=2g` no `docker run`: ela varre o histórico inteiro num contêiner, e
+  numa máquina de 4 GB derrubava a sessão de quem chamou.
+- **Protege a máquina.** Os passos rodam numa cópia do repositório, com HOME
+  isolado em `~/.cache/validar-local/home` e sem token com escrita. `git@github.com:`
+  vira HTTPS com a credencial do `gh`. Um `validar-local` por vez, e um job por
+  vez, porque dividem Docker e portas. No fim, ele confere que a árvore não mudou.
+- **Segredo nunca por argumento.** Vem do ambiente e dos arquivos
+  `~/.config/<repositório>/*.env`. `GH_PACKAGES_TOKEN` é o token do `gh`.
+- **`actionlint` só nos workflows que mudaram** em relação à `main`: um aviso
+  antigo não trava ninguém, e um novo não passa.
+- **Registro.** Tudo verde, com a árvore commitada, grava
+  `.git/validar-local/<árvore>`. É o que diz, no PR, que aquela árvore passou.
+
+Precisa de Docker, `gh` com login e Python 3.11+, mais o que o runner do GitHub
+traz e os workflows usam sem instalar (`jq`, `zstd`, `unzip`, PyYAML no Python
+do sistema) — ele confere antes de rodar e diz o que falta. As versões do
+`act`, do `actionlint` e do `yq` estão fixadas no script, com sha256.
+
+**Memória.** Numa máquina de 4 GB, o `cargo`, o Semgrep e o TruffleHog juntos
+estouram a memória. Ele roda um job por vez, limita o `cargo` a dois processos e
+se marca como a primeira vítima do OOM killer (`oom_score_adj=1000`), para que
+seja a validação a morrer, e não a sessão de quem a chamou. Um `/tmp` em tmpfs
+conta como memória.
+
 ## O que tem aqui
 
 | Arquivo | O que faz |
@@ -551,7 +613,8 @@ Composite actions: [`preparar`](.github/actions/preparar/action.yml),
 
 Scripts: [`resumo_sarif.py`](bin/resumo_sarif.py),
 [`cobertura.py`](bin/cobertura.py), [`pinar_actions.py`](bin/pinar_actions.py),
-[`semear_secret.py`](bin/semear_secret.py), [`versao.py`](bin/versao.py).
+[`semear_secret.py`](bin/semear_secret.py), [`versao.py`](bin/versao.py),
+[`validar_local.py`](bin/validar_local.py).
 
 Hook: [`hooks/commit-msg`](hooks/commit-msg), a mesma regra de `versao.py` antes
 de o commit existir.
