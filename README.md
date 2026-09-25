@@ -66,7 +66,29 @@ O paralelismo não encurtou o que já existia — ele absorveu o que faltava. Es
 O job `imagem` sozinho subiu de 43s para 79s, de propósito: ele agora constrói,
 varre e **só então** publica.
 
-### A tag de preview: `pr-<número>-<7 do head>`
+### Ambiente de preview: o que a esteira já entrega
+
+Todo app desta esteira pode ter um **ambiente efêmero por pull request**:
+label `preview` no PR e ele sobe em `https://pr-<N>-<app>.alisonamorim.com`,
+atrás do Cloudflare Access, com banco próprio se o app tiver banco; fechar,
+mergear ou tirar a label apaga tudo. O desenho inteiro está em
+`distros-setup/proxmox/PLANO-PREVIEW.md`.
+
+**Da esteira, o app não precisa fazer nada**: o job `imagem` já publica a tag
+que o preview pede (abaixo). O que falta é do lado do cluster, e são três
+passos uma vez por app — a lista está no README do `homelab-gitops`, seção
+*Ambientes de preview*, junto do arquivo que liga o preview:
+
+1. `apps/<app>/preview.yaml` no `homelab-gitops`, com `repositorio:`;
+2. a label no repositório do app: `gh label create preview -R slipalison/<repo>`;
+3. se o app tem login externo, `https://pr-*.alisonamorim.com` cadastrado no
+   provedor.
+
+Usar, depois disso: `gh pr create --label preview`, ou
+`gh pr edit <N> --add-label preview` num PR aberto. O ambiente nasce quando
+este job publica a imagem do PR; cada push novo troca a imagem.
+
+#### A tag de preview: `pr-<número>-<7 do head>`
 
 Num pull request, a imagem sai com **dois nomes para o mesmo digest**:
 `sha-<merge commit>` e `pr-<número>-<7 primeiros do SHA do head do PR>`. O
