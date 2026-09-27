@@ -1,0 +1,71 @@
+# App desktop em Rust (Tauri 2), testado em Linux E Windows, com a UI do
+# webview testada em Node. Copiar para .github/workflows/ci.yml no
+# repositorio da aplicacao e trocar os nomes. E a forma do `ddc-control`.
+#
+# SEM IMAGEM, SEM DEPLOY
+# ----------------------
+# Um app desktop nao vira container nem vai para o GitOps: `pipeline.yml`
+# traria build de imagem, Trivy e deploy para nada. Aqui o caller chama direto
+# os dois workflows que servem — `versao` (so calcula, nao cria tag) e
+# `qualidade` —, e sobra lugar para pendurar o empacotamento (MSI, deb,
+# AppImage) e a release depois deles, so na main.
+#
+# O QUE CADA COMPONENTE PROVA
+# ---------------------------
+#   app-linux    fmt, `cargo audit`, clippy, testes com piso de cobertura e o
+#                binario de release. `pacotes_sistema` traz o que o webview do
+#                Tauri linka no Linux (WebKitGTK) e o libudev de quem fala com
+#                hardware; nada disso vem na imagem do runner. A auditoria le as
+#                excecoes do `.cargo/audit.toml` do repositorio, cada uma com o
+#                motivo escrito ao lado.
+#   app-windows  os mesmos passos no windows-latest, menos a auditoria (o
+#                Cargo.lock e o mesmo: auditar de novo nao prova nada novo).
+#                Cobertura 0: o painel relata, e o piso e medido no Linux, onde
+#                o numero nao depende de codigo `cfg(windows)`.
+#   ui           `npm ci --ignore-scripts` e `npm test` no diretorio do front.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancela o run anterior da MESMA branch quando chega commit novo. O job do
+# Windows leva dezenas de minutos sem cache: tres pushes seguidos seriam tres
+# filas dele.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  versao:
+    permissions:
+      contents: read
+    uses: slipalison/github-workflows/.github/workflows/versao.yml@main
+    with:
+      versao_inicial: "0.1.0"
+
+  qualidade:
+    permissions:
+      contents: read
+    uses: slipalison/github-workflows/.github/workflows/qualidade.yml@main
+    with:
+      # O Tauri compila tres vezes no Windows (clippy, llvm-cov e release), e
+      # o primeiro run nao tem cache: os 20 minutos padrao nao bastam.
+      timeout: 60
+      # `versao` fixa o toolchain: o clippy do CI e o mesmo da maquina de quem
+      # commitou, e um lint novo do stable nao reprova o PR de ninguem.
+      # `build_release` nomeia o pacote do binario do app no workspace.
+      componentes: |
+        [
+          {"nome":"app-linux","linguagem":"rust","versao":"1.98","cobertura":80,
+           "pacotes_sistema":"libwebkit2gtk-4.1-dev libudev-dev",
+           "auditoria":true,"build_release":"meu-app"},
+          {"nome":"app-windows","linguagem":"rust","versao":"1.98","so":"windows-latest",
+           "cobertura":0,"build_release":"meu-app"},
+          {"nome":"ui","linguagem":"node","versao":"24","caminho":"ui"}
+        ]

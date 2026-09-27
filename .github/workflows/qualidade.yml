@@ -28,6 +28,23 @@ name: Qualidade
 #                --ignore-scripts: um pacote comprometido executa na instalacao,
 #                antes de qualquer teste. Ligue so se algum pacote nativo
 #                precisar compilar — e saiba qual.
+#   so           runner do componente: ubuntu-* (padrao ubuntu-latest) ou
+#                windows-*. Qualquer outro valor reprova no primeiro passo.
+#   pacotes_sistema
+#                pacotes apt, separados por espaco, instalados antes do build;
+#                so em runner Linux. Ex.: as bibliotecas do webview do Tauri.
+#   auditoria    rust: true roda `cargo audit` no Cargo.lock do componente, que
+#                le as excecoes do `.cargo/audit.toml` DELE. So em Linux: o
+#                Cargo.lock e o mesmo em qualquer SO, auditar duas vezes nao
+#                prova nada novo.
+#   build_release
+#                rust: um pacote do workspace; o passo `Build <pacote>
+#                (release)` roda `cargo build -p <pacote> --release --locked`.
+#                O `cargo llvm-cov` compila instrumentado, em perfil de teste:
+#                so este passo prova que o binario de PRODUCAO compila.
+#
+# Sem os quatro ultimos, o componente roda os mesmos passos e comandos de
+# antes, no ubuntu-latest.
 
 on:
   workflow_call:
@@ -58,7 +75,11 @@ jobs:
     # `nome` no rotulo: com matriz, sem isto a tela mostra "qualidade (Object)"
     # em todos os jobs e nao da para saber qual falhou sem abrir cada um.
     name: ${{ matrix.c.nome }}
-    runs-on: ubuntu-latest
+    # `so` fora de ubuntu-*/windows-* cai no ubuntu-latest, e o passo
+    # `Conferir componente` reprova com o motivo. Passado direto, um rotulo que
+    # nenhum runner tem deixaria o job esperando na fila, sem passo nenhum que
+    # dissesse por que.
+    runs-on: ${{ (startsWith(matrix.c.so, 'ubuntu-') || startsWith(matrix.c.so, 'windows-')) && matrix.c.so || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout }}
     permissions:
       contents: read
@@ -72,12 +93,80 @@ jobs:
     defaults:
       run:
         working-directory: ${{ matrix.c.caminho || '.' }}
+        # bash tambem no Windows, onde o padrao e o pwsh e nenhum script daqui
+        # roda (`set -euo pipefail`, `[ ]`, `$VAR`). No Linux o `shell: bash`
+        # explicito so acrescenta o `pipefail` a quem nao o liga sozinho; todo
+        # `run:` com pipe aqui ja faz `set -euo pipefail`, entao nada muda.
+        shell: bash
     steps:
+      - name: Conferir componente
+        # Antes do checkout e sem rede: um campo errado reprova aqui, dizendo
+        # qual e por que, em vez de virar passo pulado em silencio ou erro de
+        # apt no meio do build. Os valores vem do JSON de quem chama e chegam
+        # por `env`, nunca interpolados no script. `working-directory: .`
+        # porque o `caminho` so existe depois do checkout.
+        working-directory: .
+        env:
+          SO: ${{ matrix.c.so || '' }}
+          LINGUAGEM: ${{ matrix.c.linguagem }}
+          PACOTES: ${{ matrix.c.pacotes_sistema || '' }}
+          # toJSON, e nao `== true`: a string "true" com aspas seria ignorada
+          # calada, e o componente passaria sem auditoria achando que tem.
+          AUDITORIA: ${{ toJSON(matrix.c.auditoria) }}
+          RELEASE: ${{ matrix.c.build_release || '' }}
+        run: |
+          set -euo pipefail
+          erro=0
+          reprovar() { echo "::error::$1"; erro=1; }
+          case "$SO" in
+            "" | ubuntu-* | windows-*) ;;
+            *) reprovar "so: aceito ubuntu-* ou windows-*." ;;
+          esac
+          # [[ =~ ]], e nao grep: o grep casa linha a linha, e um valor com
+          # quebra de linha passaria se uma das linhas fosse valida.
+          re_pacotes='^[a-z0-9][a-z0-9.+-]*( [a-z0-9][a-z0-9.+-]*)*$'
+          if [ -n "$PACOTES" ]; then
+            [[ $PACOTES =~ $re_pacotes ]] ||
+              reprovar "pacotes_sistema: nomes de pacote apt separados por um espaco ($re_pacotes)."
+            [ "$RUNNER_OS" = "Linux" ] ||
+              reprovar "pacotes_sistema e apt: so em runner Linux (este e $RUNNER_OS)."
+          fi
+          case "$AUDITORIA" in
+            true)
+              if [ "$LINGUAGEM" != "rust" ] || [ "$RUNNER_OS" != "Linux" ]; then
+                reprovar "auditoria: so em componente rust num runner Linux."
+              fi
+              ;;
+            false | null) ;;
+            *) reprovar "auditoria: true ou false, sem aspas." ;;
+          esac
+          re_pacote_cargo='^[A-Za-z0-9_-]+$'
+          if [ -n "$RELEASE" ]; then
+            [ "$LINGUAGEM" = "rust" ] ||
+              reprovar "build_release: so em componente rust."
+            [[ $RELEASE =~ $re_pacote_cargo ]] ||
+              reprovar "build_release: nome de pacote cargo ($re_pacote_cargo)."
+          fi
+          exit "$erro"
+
       - name: Preparar
         uses: slipalison/github-workflows/.github/actions/preparar@main
         with:
           linguagem: ${{ matrix.c.linguagem }}
           versao: ${{ matrix.c.versao || '' }}
+
+      - name: Instalar pacotes do sistema
+        # Depois do `preparar`: o apt e trafego de saida, e o harden-runner
+        # precisa ja estar olhando. A lista passou pela regex no primeiro passo
+        # e chega por `env`.
+        if: runner.os == 'Linux' && matrix.c.pacotes_sistema
+        env:
+          PACOTES: ${{ matrix.c.pacotes_sistema }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          # shellcheck disable=SC2086 # uma palavra por pacote, de proposito
+          sudo apt-get install -y -q --no-install-recommends $PACOTES
 
       # ---------------------------------------------------------------- dotnet
       - name: dotnet restore
@@ -205,6 +294,39 @@ jobs:
         # passo: a tela de falha diz qual foi sem ninguem abrir o log.
         run: cargo fmt --all -- --check
 
+      - name: Instalar cargo-audit
+        if: matrix.c.linguagem == 'rust' && matrix.c.auditoria == true
+        # Binario pronto, versao fixa e hash conferido — o mesmo argumento do
+        # cargo-llvm-cov, logo abaixo. `cargo install cargo-audit` compilaria a
+        # ferramenta por minutos, e na versao que o crates.io tiver hoje. O
+        # sha256 e o `digest` da release cargo-audit/v0.22.2 no GitHub.
+        env:
+          VERSAO_AUDIT: "0.22.2"
+          SHA256_AUDIT: "ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39"
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_ARCH" != "X64" ]; then
+            echo "::error::cargo-audit: so ha binario conferido para Linux X64 (este e $RUNNER_ARCH)."
+            exit 1
+          fi
+          nome="cargo-audit-x86_64-unknown-linux-gnu-v${VERSAO_AUDIT}"
+          tmp=$(mktemp -d)
+          curl --proto '=https' --tlsv1.2 -fsSL -o "$tmp/$nome.tgz" \
+            "https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv${VERSAO_AUDIT}/${nome}.tgz"
+          echo "${SHA256_AUDIT}  $tmp/$nome.tgz" | sha256sum -c -
+          tar xzf "$tmp/$nome.tgz" -C "$tmp"
+          install -m 0755 "$tmp/$nome/cargo-audit" "${CARGO_HOME:-$HOME/.cargo}/bin/cargo-audit"
+          cargo audit --version
+
+      - name: cargo audit
+        if: matrix.c.linguagem == 'rust' && matrix.c.auditoria == true
+        # Antes do clippy: leva segundos, e dependencia vulneravel e motivo para
+        # parar antes de dez minutos de compilacao. Le o Cargo.lock e o
+        # `.cargo/audit.toml` do `caminho`: cada excecao e do repositorio que a
+        # assume, com o motivo escrito la. Sem `--ignore`, sem `|| true`:
+        # vulnerabilidade que o chamador nao ignorou reprova.
+        run: cargo audit
+
       - name: cargo clippy
         if: matrix.c.linguagem == 'rust'
         # `-D warnings` transforma lint em erro. Sem isso o clippy vira decoracao:
@@ -220,13 +342,35 @@ jobs:
         #
         # A VERSAO E FIXA, e nao `latest/download`. Mesmo argumento dos SHAs das
         # actions em actions.lock.json: `latest` e ponteiro movel, e quem publica
-        # decide o que roda aqui dentro. Para subir, troque o numero e abra PR.
+        # decide o que roda aqui dentro. Para subir, troque o numero E os dois
+        # hashes, e abra PR.
+        #
+        # O pacote e o do SO do runner — a v0.9.1 publica .tar.gz para Linux e
+        # para Windows —, e o sha256 e o `digest` de cada um na release: a
+        # versao diz o que baixar, o hash prova que chegou isso. Arquivo que
+        # nao bate nao e extraido. No Windows o CARGO_HOME e caminho Windows
+        # (C:\...); o `cygpath` o traduz para o tar do Git Bash.
         env:
           VERSAO_LLVM_COV: "0.9.1"
+          SHA256_LINUX: "b3f68e625481fed9b16444174f3fa5ebcdbde4a1878803a35eabe2dcefcdc41a"
+          SHA256_WINDOWS: "15eefd5b90fcdd4006b727c6e710d70a61aff509fcd7bb37f9c2a35c4f024948"
         run: |
           set -euo pipefail
-          url="https://github.com/taiki-e/cargo-llvm-cov/releases/download/v${VERSAO_LLVM_COV}/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz"
-          curl --proto '=https' --tlsv1.2 -fsSL "$url" | tar xzf - -C "$HOME/.cargo/bin"
+          case "$RUNNER_OS-$RUNNER_ARCH" in
+            Linux-X64) alvo=x86_64-unknown-linux-gnu; sha256=$SHA256_LINUX ;;
+            Windows-X64) alvo=x86_64-pc-windows-msvc; sha256=$SHA256_WINDOWS ;;
+            *)
+              echo "::error::cargo-llvm-cov: sem binario conferido para $RUNNER_OS/$RUNNER_ARCH."
+              exit 1
+              ;;
+          esac
+          destino="${CARGO_HOME:-$HOME/.cargo}/bin"
+          if command -v cygpath >/dev/null 2>&1; then destino=$(cygpath -u "$destino"); fi
+          arquivo="$(mktemp -d)/cargo-llvm-cov.tar.gz"
+          curl --proto '=https' --tlsv1.2 -fsSL -o "$arquivo" \
+            "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v${VERSAO_LLVM_COV}/cargo-llvm-cov-${alvo}.tar.gz"
+          echo "${sha256}  ${arquivo}" | sha256sum -c -
+          tar xzf "$arquivo" -C "$destino"
           cargo llvm-cov --version
 
       - name: cargo test com cobertura
@@ -244,7 +388,40 @@ jobs:
           cargo llvm-cov --all-features $PACOTE \
             --lcov --output-path resultados/lcov.info
 
+      - name: Build ${{ matrix.c.build_release }} (release)
+        if: matrix.c.linguagem == 'rust' && matrix.c.build_release
+        # Depois dos testes: e o passo mais longo, e so vale a pena com o
+        # codigo ja aprovado. `--locked` porque o binario de producao tem de
+        # sair do Cargo.lock versionado, e nao de uma resolucao nova.
+        env:
+          PACOTE_RELEASE: ${{ matrix.c.build_release }}
+        run: cargo build -p "$PACOTE_RELEASE" --release --locked
+
       # --------------------------------------------------------------- comum --
+      - name: python3 no bash (Windows)
+        # `relatar-cobertura` chama `python3`, e o runner Windows so tem
+        # `python` no PATH: o instalador do python.org nao cria python3.exe
+        # (actions/setup-python#123). A composite roda `@main` e nao muda aqui
+        # — um caller que aponta para o SHA deste arquivo nao a exercitaria —,
+        # entao a ponte fica no workflow: um `python3` que repassa ao `python`
+        # do runner, com UTF-8 no stdout (o padrao do Windows e cp1252). Se a
+        # imagem um dia trouxer python3, o passo so confere e sai.
+        if: always() && runner.os == 'Windows'
+        working-directory: .
+        run: |
+          set -euo pipefail
+          if python3 -c 'import sys' >/dev/null 2>&1; then
+            echo "python3 ja responde: $(command -v python3)"
+            exit 0
+          fi
+          # cobertura.py usa typing.Self, que e do 3.11.
+          python -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
+          ponte="$(cygpath -u "$RUNNER_TEMP")/python3-no-bash"
+          mkdir -p "$ponte"
+          printf '#!/usr/bin/env bash\nexport PYTHONUTF8=1\nexec python "$@"\n' > "$ponte/python3"
+          chmod +x "$ponte/python3"
+          cygpath -w "$ponte" >> "$GITHUB_PATH"
+
       - name: Cobertura
         # `always()`: sem isto, teste vermelho pula o relatorio e some a unica
         # tela que diz o quanto do codigo foi exercitado antes de quebrar.
