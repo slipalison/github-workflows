@@ -746,16 +746,16 @@ Entrou em 2026-09-27, com o `ddc-control` — um app de bandeja em Tauri 2 que
 precisa compilar e passar nos testes em Linux **e** Windows. O exemplo
 [`ci-rust-desktop.yml`](exemplos/ci-rust-desktop.yml) é essa forma.
 
-**`so: windows-latest`.** O componente roda no Windows com os mesmos passos.
-Os `run:` do `qualidade.yml` usam `bash` também lá (o Git Bash da imagem), e
-não o `pwsh` padrão: os scripts são os mesmos nos dois SOs. O `cargo-llvm-cov`
-vem no pacote do SO do runner. Como o `relatar-cobertura` chama `python3` e o
-Windows só tem `python`, um passo só do Windows põe no PATH um `python3` que
-repassa ao `python` do runner. O piso de cobertura costuma ficar no componente
-Linux (`cobertura: 0` no Windows): o painel relata, e o número que vale não
-depende de código `cfg(windows)`. Com `so` fora de `ubuntu-*`/`windows-*` o job
-roda no `ubuntu-latest` e reprova no primeiro passo. Passado direto, um rótulo
-que nenhum runner tem deixaria o job esperando na fila, sem dizer por quê.
+**`so: windows-latest`.** O componente roda no Windows com os mesmos passos. Os
+`run:` do `qualidade.yml` usam `bash` também lá (o Git Bash da imagem), e não o
+`pwsh` padrão: os scripts são os mesmos nos dois SOs. O `cargo-llvm-cov` vem no
+pacote do SO do runner. O `relatar-cobertura` roda sem mudança: o Python do
+`windows-latest` já responde como `python3` no Git Bash (medido em 2026-09-27, o
+3.12.10 do tool cache). O piso de cobertura costuma ficar no componente Linux
+(`cobertura: 0` no Windows): o painel relata, e o número que vale não depende de
+código `cfg(windows)`. Com `so` fora de `ubuntu-*`/`windows-*` o job roda no
+`ubuntu-latest` e reprova no primeiro passo. Passado direto, um rótulo que
+nenhum runner tem deixaria o job esperando na fila, sem dizer por quê.
 
 **`pacotes_sistema`.** O que o crate linka e a imagem do runner não traz: no
 Tauri, o WebKitGTK (`libwebkit2gtk-4.1-dev`). A lista é validada por regex no
