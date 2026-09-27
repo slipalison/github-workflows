@@ -22,7 +22,9 @@
 #                Cargo.lock e o mesmo: auditar de novo nao prova nada novo).
 #                Cobertura 0: o painel relata, e o piso e medido no Linux, onde
 #                o numero nao depende de codigo `cfg(windows)`.
-#   ui           `npm ci --ignore-scripts` e `npm test` no diretorio do front.
+#   ui           `npm ci --ignore-scripts` e `npm test` no diretorio do front,
+#                no ubuntu-latest: o `qualidade` so aceita windows-* com
+#                `linguagem: rust`, a unica medida no Windows.
 name: CI
 
 on:

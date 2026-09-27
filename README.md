@@ -698,7 +698,7 @@ componentes: |
 | `projeto` | dotnet: `.sln`/`.csproj` · node: workspace · go: `./...` · rust: pacote do workspace (`--package`), vazio = `--workspace` |
 | `cobertura` | piso em %; `0` (padrão) desliga |
 | `scripts_de_instalacao` | node: `true` deixa o `npm ci` rodar `postinstall` e afins. O padrão é `--ignore-scripts`: script de instalação roda antes de qualquer teste, e é o vetor clássico de pacote comprometido. Ligue só para pacote nativo que precise compilar. |
-| `so` | runner do componente: `ubuntu-*` (padrão `ubuntu-latest`) ou `windows-*`. Outro valor reprova no primeiro passo, `Conferir componente`. |
+| `so` | runner do componente: `ubuntu-*` (padrão `ubuntu-latest`) ou `windows-*`, este só com `linguagem: rust`, a única medida no Windows. Fora disso, reprova no primeiro passo, `Conferir componente`. |
 | `pacotes_sistema` | pacotes apt separados por espaço, instalados antes do build. Só em runner Linux; a lista passa por regex e chega ao `apt-get` por `env`. |
 | `auditoria` | rust: `true` roda `cargo audit`. Só em runner Linux. |
 | `build_release` | rust: um pacote do workspace; o passo `Build <pacote> (release)` roda `cargo build -p <pacote> --release --locked`. |
@@ -756,6 +756,13 @@ pacote do SO do runner. O `relatar-cobertura` roda sem mudança: o Python do
 código `cfg(windows)`. Com `so` fora de `ubuntu-*`/`windows-*` o job roda no
 `ubuntu-latest` e reprova no primeiro passo. Passado direto, um rótulo que
 nenhum runner tem deixaria o job esperando na fila, sem dizer por quê.
+
+**Windows só com `rust`.** É a única linguagem medida lá, com o `shell: bash` e
+o `preparar`. dotnet, python, node e go nunca rodaram nessa combinação, e o
+`go test -race` ainda pede cgo com um gcc que a imagem não traz. Um componente
+`windows-*` de outra linguagem reprova no `Conferir componente`, dizendo isso,
+em vez de quebrar no meio do build. Para liberar outra linguagem, é preciso um
+run real que a prove, no mesmo PR que a libera.
 
 **`pacotes_sistema`.** O que o crate linka e a imagem do runner não traz: no
 Tauri, o WebKitGTK (`libwebkit2gtk-4.1-dev`). A lista é validada por regex no

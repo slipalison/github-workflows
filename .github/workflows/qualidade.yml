@@ -29,7 +29,8 @@ name: Qualidade
 #                antes de qualquer teste. Ligue so se algum pacote nativo
 #                precisar compilar — e saiba qual.
 #   so           runner do componente: ubuntu-* (padrao ubuntu-latest) ou
-#                windows-*. Qualquer outro valor reprova no primeiro passo.
+#                windows-*, este so com `linguagem: rust`, a unica medida no
+#                Windows. Fora disso, reprova no primeiro passo.
 #   pacotes_sistema
 #                pacotes apt, separados por espaco, instalados antes do build;
 #                so em runner Linux. Ex.: as bibliotecas do webview do Tauri.
@@ -122,6 +123,14 @@ jobs:
             "" | ubuntu-* | windows-*) ;;
             *) reprovar "so: aceito ubuntu-* ou windows-*." ;;
           esac
+          # Windows so com rust: e a unica linguagem que rodou la, com o
+          # `shell: bash` daqui e o `preparar` (ddc-control, 2026-09-27).
+          # dotnet, python, node e go nunca passaram por isso no Windows, e o
+          # `go test -race` ainda pede cgo com um gcc que o runner nao traz.
+          # Liberar outra linguagem exige um run real que a prove.
+          if [[ $SO == windows-* ]] && [ "$LINGUAGEM" != "rust" ]; then
+            reprovar "so: windows-* so com linguagem rust, a unica medida no Windows."
+          fi
           # [[ =~ ]], e nao grep: o grep casa linha a linha, e um valor com
           # quebra de linha passaria se uma das linhas fosse valida.
           re_pacotes='^[a-z0-9][a-z0-9.+-]*( [a-z0-9][a-z0-9.+-]*)*$'
