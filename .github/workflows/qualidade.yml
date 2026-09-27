@@ -397,11 +397,14 @@ jobs:
           cargo llvm-cov --all-features $PACOTE \
             --lcov --output-path resultados/lcov.info
 
-      - name: Build ${{ matrix.c.build_release }} (release)
+      - name: ${{ matrix.c.build_release && format('Build {0} (release)', matrix.c.build_release) || 'Build de release' }}
         if: matrix.c.linguagem == 'rust' && matrix.c.build_release
         # Depois dos testes: e o passo mais longo, e so vale a pena com o
         # codigo ja aprovado. `--locked` porque o binario de producao tem de
         # sair do Cargo.lock versionado, e nao de uma resolucao nova.
+        # Com o campo, o nome e `Build <pacote> (release)`, e quem chama pode
+        # consultar o passo por ele. O `format` so monta esse nome com o campo
+        # preenchido: sem ele, o passo pulado apareceria como `Build  (release)`.
         env:
           PACOTE_RELEASE: ${{ matrix.c.build_release }}
         run: cargo build -p "$PACOTE_RELEASE" --release --locked
