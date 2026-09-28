@@ -39,13 +39,11 @@
 # A RELEASE, SO DEPOIS DO PORTAO. Na main, com qualidade, seguranca e Sonar
 # verdes, o `lancar` cria a tag e a release com os pacotes dos dois SOs
 # anexados, o `SHA256SUMS` e a secao do CHANGELOG. Em pull request ele nunca
-# roda. Num push em `ensaio-release/**` (`ramo_de_ensaio`) ele roda como
-# RASCUNHO, sem tag e nao publico, e e como se prova a release inteira antes do
-# merge; o primeiro push de verdade na main apaga o rascunho e publica. Quem
-# pode empurrar uma branch dessas ja pode empurrar na main. Nao ensaie perto do
-# merge: um ensaio da mesma versao rodando junto com o `lancar` da main
-# apagaria o rascunho em transito dela, e a release da main falharia sem
-# publicar (ver o cabecalho do lancar.yml).
+# roda, e os pacotes de todo PR ficam como artefato do run
+# (`pacotes-app-linux`, `pacotes-app-windows`), para baixar e instalar antes do
+# merge. Sem ensaio de release em branch: o SonarQube Cloud Free nao analisa
+# branch que nao seja a principal, e o rascunho nao passaria pelo Sonar (ver o
+# README, "Pacotes na release").
 #
 # A VERSAO E CARIMBADA. O Cargo.toml do repositorio diz `0.0.0`, e o
 # `qualidade` escreve nele a versao que o `versao` calculou, antes do build de
@@ -54,7 +52,7 @@ name: CI
 
 on:
   push:
-    branches: [main, 'ensaio-release/**']
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -116,7 +114,6 @@ jobs:
       # que roda codigo de terceiro, como o `ui` com as dependencias npm.
       artefatos_release: "pacotes-app-*"
       changelog: CHANGELOG.md
-      ramo_de_ensaio: "ensaio-release/"
 
       # ------------------------------------------------------- seguranca ----
       # Repositorio PUBLICO: o CodeQL e gratuito e publica na aba Security.

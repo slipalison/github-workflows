@@ -568,7 +568,7 @@ arquivo lá em vez de apontar para cá.
 | `versionar` | `true` | desliga tudo isto |
 | `commits_sem_tipo` | `reprovar` | `patch` (vira correção) ou `ignorar` (não conta) |
 | `versao_inicial` | `1.0.0` | primeira tag |
-| `tag_movel_major` | `false` | também move `v1`, `v2`… — para repositório de templates e actions. No `lancar.yml` chamado direto, nunca junto com `rascunho` (ver abaixo): reprova. Pelo `pipeline.yml`, a tag de major só se move na branch de produção. |
+| `tag_movel_major` | `false` | também move `v1`, `v2`… — para repositório de templates e actions. Nunca junto com `rascunho` (ver abaixo): reprova. |
 
 Quem chama precisa conceder `contents: write` (tag e release) e `packages: write`
 (alias da imagem).
@@ -576,17 +576,16 @@ Quem chama precisa conceder `contents: write` (tag e release) e `packages: write
 ### Pacotes na release
 
 Quem publica instalador, e não imagem (um app desktop), usa o mesmo
-`pipeline.yml`, com três inputs a mais. Todos são opcionais, e sem eles nada
+`pipeline.yml`, com dois inputs a mais. Os dois são opcionais, e sem eles nada
 muda:
 
 | Input do `pipeline.yml` | Vira, no `lancar.yml` | |
 |---|---|---|
 | `artefatos_release` | `artefatos` | os pacotes deste run que vão anexados |
 | `changelog` | `changelog` | a seção do CHANGELOG que abre as notas |
-| `ramo_de_ensaio` | `rascunho: true` numa branch com esse prefixo | o ensaio (abaixo); vazio desliga |
 
-O [`lancar.yml`](.github/workflows/lancar.yml) chamado direto recebe os mesmos
-três inputs. Isso vale para um repositório que não é aplicação: chamado assim,
+O [`lancar.yml`](.github/workflows/lancar.yml) chamado direto recebe esses
+dois e mais o `rascunho`. Isso vale para um repositório que não é aplicação: chamado assim,
 ele não passa pela segurança, pelo Sonar nem pelo portão
 ([O mínimo exigido](#o-mínimo-exigido)).
 
@@ -624,14 +623,18 @@ ensaio que mediu a lista, os sete pacotes do `ddc-control` (~100 MB) foram
 baixados, somados e anexados em 20 s.
 
 **O ensaio.** Um rascunho não cria a tag nem aparece para quem não tem escrita
-no repositório. É como o repositório da aplicação prova o job inteiro sem
-publicar nada: o [`ci-rust-desktop.yml`](exemplos/ci-rust-desktop.yml) dispara
-também num push em `ensaio-release/**` e passa `ramo_de_ensaio:
-"ensaio-release/"`, e o `pipeline.yml` chama o `lancar` ali com `rascunho:
-true`. O ensaio passa pelos mesmos portões da `main`: sem qualidade,
-segurança e Sonar verdes, não há rascunho. O rascunho fica para alguém baixar
-e instalar os pacotes; o primeiro push de verdade na `main` o apaga e publica a
-release no lugar.
+no repositório. Foi assim que o `ddc-control` provou o job inteiro antes da
+v0.1.0, chamando o `lancar.yml` direto numa branch `ensaio-release/*`. O
+primeiro push de verdade na `main` apaga o rascunho e publica a release no
+lugar.
+
+**Pelo `pipeline.yml` não há ensaio.** O rascunho teria de passar pelos
+portões, e o SonarQube Cloud Free só analisa a branch principal e os pull
+requests. Medido no `ddc-control` (run 36498449337): o relatório da branch de
+ensaio sobe, e a consulta do Quality Gate volta *"Not authorized or project not
+found"*. Pular o Sonar no ensaio seria abrir a porta que o pipeline fecha. Os
+pacotes de todo pull request ficam como artefato do run, para baixar e
+instalar.
 
 **Não ensaie perto do merge.** Com anexos, o `gh release create` da `main`
 também passa por um rascunho enquanto sobe os arquivos. Um ensaio da mesma

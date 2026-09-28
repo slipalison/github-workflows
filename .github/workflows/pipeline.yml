@@ -67,11 +67,17 @@ name: Pipeline
 # Sem `imagem` e sem `app`, os jobs `imagem` e `publicar` saem pulados e o resto
 # e a esteira inteira. O que um instalador precisa a mais passa por inputs:
 # `timeout_qualidade` (o Tauri sem cache estoura os 20 minutos padrao),
-# `artefatos_release` e `changelog` (os pacotes e as notas da release) e
-# `ramo_de_ensaio` (a release inteira como rascunho, antes do merge). O
+# `artefatos_release` e `changelog` (os pacotes e as notas da release). O
 # `ddc-control` chamou `versao`, `qualidade` e `lancar` avulsos ate 2026-09-28
 # e publicou a v0.1.0 sem varredura de seguranca, sem Sonar e sem portao —
 # nada no painel dizia que faltavam. E o exemplo `ci-rust-desktop.yml`.
+#
+# Sem ensaio de release por aqui: o rascunho numa branch de ensaio teria de
+# passar pelo Sonar, e o SonarQube Cloud Free so analisa a branch principal e
+# os pull requests. Medido no ddc-control (run 36498449337): o relatorio da
+# branch sobe, e a consulta do Quality Gate volta "Not authorized or project
+# not found". Pular o Sonar no ensaio abriria exatamente a porta que este
+# arquivo fecha. Os pacotes de todo PR ficam como artefato do run.
 
 on:
   workflow_call:
@@ -113,16 +119,6 @@ on:
           CHANGELOG no formato Keep a Changelog, relativo a raiz. A secao da
           versao (ou a `[Unreleased]`) abre as notas da release. Vazio: so as
           notas dos commits.
-        required: false
-        type: string
-        default: ""
-      ramo_de_ensaio:
-        description: >-
-          Prefixo de branch, ex.: `ensaio-release/`. Um push numa branch que
-          comeca com ele roda o `lancar` como RASCUNHO: sem tag, sem publicar,
-          sem mover a tag de major e sem deploy. Prova a release inteira antes
-          do merge. Vazio desliga. O `on: push` de quem chama precisa incluir a
-          branch.
         required: false
         type: string
         default: ""
@@ -428,19 +424,12 @@ jobs:
     # O ultimo. Depois de todos os portoes E depois do GitOps: a tag e a prova de
     # que o commit passou por tudo e chegou ao cluster. `salto == nenhum` (HEAD
     # ja tageado, run repetido) nao cria nada.
-    #
-    # Numa branch de `ramo_de_ensaio`, o mesmo job com `rascunho: true`: sem
-    # tag, sem publicar. `inputs.ramo_de_ensaio != ''` vem ANTES do
-    # `startsWith`, porque com ele vazio o prefixo seria `refs/heads/` e
-    # casaria toda branch. O `publicar` continua so na de producao.
     needs: [versao, qualidade, imagem, sonar, seguranca, publicar]
     if: >-
       always()
       && inputs.versionar
       && github.event_name != 'pull_request'
-      && (github.ref == format('refs/heads/{0}', inputs.branch_de_producao)
-          || (inputs.ramo_de_ensaio != ''
-              && startsWith(github.ref, format('refs/heads/{0}', inputs.ramo_de_ensaio))))
+      && github.ref == format('refs/heads/{0}', inputs.branch_de_producao)
       && needs.versao.result == 'success'
       && needs.versao.outputs.salto != 'nenhum'
       && needs.qualidade.result == 'success'
@@ -459,15 +448,11 @@ jobs:
       tag: ${{ needs.versao.outputs.tag }}
       imagem: ${{ needs.imagem.result == 'success' && inputs.imagem || '' }}
       digest: ${{ needs.imagem.outputs.digest }}
-      # A `vN` e tag de verdade, a que os consumidores usam: so na producao. O
-      # lancar.yml reprova `rascunho` junto com `tag_movel_major`, e o ensaio
-      # nao tem o que mover.
-      tag_movel_major: ${{ inputs.tag_movel_major && github.ref == format('refs/heads/{0}', inputs.branch_de_producao) }}
+      tag_movel_major: ${{ inputs.tag_movel_major }}
       commits_sem_tipo: ${{ inputs.commits_sem_tipo }}
       versao_inicial: ${{ inputs.versao_inicial }}
       artefatos: ${{ inputs.artefatos_release }}
       changelog: ${{ inputs.changelog }}
-      rascunho: ${{ github.ref != format('refs/heads/{0}', inputs.branch_de_producao) }}
 
   # Um unico check para marcar como obrigatorio na protecao de branch. Sem isto
   # a lista de checks obrigatorios precisa nomear cada job, e um job novo entra
