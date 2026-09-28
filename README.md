@@ -843,7 +843,13 @@ o caminho é conhecido.
 
 No Sonar, as propriedades são `sonar.rust.lcov.reportPaths` (ou
 `sonar.rust.cobertura.reportPaths`) e `sonar.rust.cargo.manifestPaths`. O
-analisador roda o Clippy sozinho — `sonar.rust.clippy.enabled` vem ligado.
+analisador de Rust do SonarQube Cloud não compila e não roda o Clippy: medido
+no `ddc-control` (2026-09-28), o sensor `Rust Enterprise` analisou o workspace
+em 4,6 s com o perfil *Sonar way comprehensive*, sem uma linha de Clippy no log.
+O Clippy com `-D warnings` é portão do job de qualidade. O que compila no job do
+Sonar é o `comando_testes`, que mede a cobertura: por isso ele pede o toolchain
+(`sonar_versao_linguagem`) e, num app Tauri, as bibliotecas de sistema
+(`sonar_pacotes_sistema`).
 
 #### Windows, pacotes do sistema, auditoria e build de release
 

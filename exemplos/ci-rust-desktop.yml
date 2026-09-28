@@ -125,14 +125,14 @@ jobs:
       linguagens_codeql: '["rust","javascript-typescript","actions"]'
 
       # ----------------------------------------------------------- sonar ----
-      # O analisador de Rust do Sonar roda o Clippy sozinho, e o Clippy compila
-      # o workspace: o job do Sonar precisa das mesmas bibliotecas do webview
-      # (`sonar_pacotes_sistema`) e do mesmo toolchain
-      # (`sonar_versao_linguagem`). O librsvg fica de fora: so o AppImage o usa.
-      #
       # O job do Sonar roda os testes DE NOVO, em paralelo com a qualidade
       # (o custo aceito no README). `comando_testes` escreve os dois LCOV que
-      # os parametros apontam. O `ddc-control` guarda esse comando num script
+      # os parametros apontam, e o `cargo llvm-cov` dele compila o workspace:
+      # por isso as mesmas bibliotecas do webview (`sonar_pacotes_sistema`) e
+      # o mesmo toolchain (`sonar_versao_linguagem`). O librsvg fica de fora:
+      # so o AppImage o usa. O analisador de Rust do Sonar em si nao compila
+      # nem roda o Clippy (medido no ddc-control, ver o README); o Clippy com
+      # `-D warnings` e portao do job de qualidade. O `ddc-control` guarda esse comando num script
       # do repositorio, que roda na maquina de quem escreve tambem.
       #
       # A Analise Automatica do SonarQube Cloud precisa estar DESLIGADA no

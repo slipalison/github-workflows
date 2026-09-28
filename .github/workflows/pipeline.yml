@@ -202,7 +202,8 @@ on:
       sonar_versao_linguagem:
         description: >-
           Versao da linguagem no job do Sonar, como o `versao` de um
-          componente. Em Rust e o toolchain do Clippy que o Sonar roda.
+          componente. Em Rust e o toolchain do `comando_testes`, que compila
+          e mede a cobertura.
         required: false
         type: string
         default: ""

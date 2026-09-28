@@ -90,9 +90,10 @@ on:
         description: >-
           Pacotes apt, separados por espaco, instalados antes dos testes e da
           analise; o `pacotes_sistema` do qualidade.yml, com a mesma regra. Em
-          Rust o Sonar roda o Clippy, que compila o workspace: a biblioteca de
-          sistema que o build linka (o WebKitGTK de um app Tauri) precisa
-          estar aqui tambem, e nao so no job de qualidade.
+          Rust, o `comando_testes` que mede a cobertura compila o workspace: a
+          biblioteca de sistema que o build linka (o WebKitGTK de um app
+          Tauri) precisa estar aqui tambem, e nao so no job de qualidade. O
+          analisador do Sonar em si nao compila (ver o README, Rust).
         required: false
         type: string
         default: ""
