@@ -6,9 +6,9 @@
 # ----------------------
 # Um app desktop nao vira container nem vai para o GitOps: `pipeline.yml`
 # traria build de imagem, Trivy e deploy para nada. Aqui o caller chama direto
-# os dois workflows que servem — `versao` (so calcula, nao cria tag) e
-# `qualidade` —, e sobra lugar para pendurar o empacotamento (MSI, deb,
-# AppImage) e a release depois deles, so na main.
+# os tres workflows que servem: `versao` (so calcula, nao cria tag),
+# `qualidade` (que tambem empacota msi, NSIS, deb, rpm e AppImage) e, so na
+# main, `lancar`, que cria a tag e a release com os pacotes.
 #
 # O QUE CADA COMPONENTE PROVA
 # ---------------------------
@@ -29,6 +29,14 @@
 #                Cobertura 0: o painel relata, e o piso e medido no Linux, onde
 #                o numero nao depende de codigo `cfg(windows)`.
 #
+# A RELEASE, SO NA MAIN. Depois da `qualidade` inteira verde, o `lancar` cria
+# a tag e a release com os pacotes dos dois SOs anexados, o `SHA256SUMS` e a
+# secao do CHANGELOG. Em pull request ele nunca roda. Num push em
+# `ensaio-release/**` ele roda com `rascunho: true`: cria um RASCUNHO, sem tag
+# e nao publico, e e como se prova o job inteiro antes do merge. O primeiro
+# push de verdade na main apaga esse rascunho e publica a release. Quem pode
+# empurrar uma branch dessas ja pode empurrar na main.
+#
 # A VERSAO E CARIMBADA. O Cargo.toml do repositorio diz `0.0.0`, e o
 # `qualidade` escreve nele a versao que o `versao` calculou (por isso o
 # `needs`), antes do build de release: os pacotes do PR ja saem com o numero
@@ -40,7 +48,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'ensaio-release/**']
   pull_request:
   workflow_dispatch:
 
@@ -92,3 +100,25 @@ jobs:
            "binarios_extra":"meu-cli","carimbar_versao":true},
           {"nome":"ui","linguagem":"node","versao":"24","caminho":"ui"}
         ]
+
+  lancar:
+    needs: [versao, qualidade]
+    if: >-
+      github.event_name == 'push'
+      && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/ensaio-release/'))
+      && needs.versao.outputs.salto != 'nenhum'
+    # `packages: write` mesmo sem imagem: a checagem de permissao do GitHub e
+    # estatica e le o job `alias` do lancar.yml, que fica pulado. O motivo
+    # medido esta no cabecalho do lancar.yml.
+    permissions:
+      contents: write
+      packages: write
+    uses: slipalison/github-workflows/.github/workflows/lancar.yml@main
+    with:
+      versao: ${{ needs.versao.outputs.versao }}
+      tag: ${{ needs.versao.outputs.tag }}
+      # O MESMO literal do job `versao`: se mudar, muda nos dois.
+      versao_inicial: "0.1.0"
+      artefatos: "pacotes-*"
+      changelog: CHANGELOG.md
+      rascunho: ${{ github.ref != 'refs/heads/main' }}

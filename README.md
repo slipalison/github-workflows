@@ -198,7 +198,7 @@ esquecido não dá erro, só deixa de ter a proteção. Aqui isso é
 | Imagem varrida **antes** de publicar | [`build-push.yml`](.github/workflows/build-push.yml) | A versão anterior publicava e só depois varria: uma imagem com CRITICAL ficava no GHCR mesmo com o job vermelho. |
 | Segredo varrido no **histórico inteiro** | [`seguranca.yml`](.github/workflows/seguranca.yml) | Um segredo removido do HEAD continua em qualquer clone. Achado ali significa **rotacionar**, não apagar a linha. |
 | `concurrency` com `cancel-in-progress` | exemplos | Impede que um run obsoleto ainda escreva no GitOps. |
-| Tag e release só com `GITHUB_TOKEN`, no último job | [`lancar.yml`](.github/workflows/lancar.yml) | `contents: write` existe num job só, depois de todos os portões, e nunca em pull request. Nenhum PAT: tudo o que precisa da versão acontece no mesmo run. Assunto de commit é texto de terceiro — entra nas notas por arquivo, nunca por linha de comando. |
+| Tag e release só com `GITHUB_TOKEN`, no último job | [`lancar.yml`](.github/workflows/lancar.yml) | `contents: write` existe num job só, depois de todos os portões, e nunca em pull request. Nenhum PAT: tudo o que precisa da versão acontece no mesmo run. Assunto de commit e CHANGELOG são texto de terceiro — entram nas notas por arquivo, nunca por linha de comando. Os pacotes anexados levam um `SHA256SUMS`. |
 
 O CI deste repositório roda `pinar_actions.py --verificar`, que **falha** se
 algum `uses:` escapar por tag ou divergir do lock.
@@ -548,6 +548,42 @@ arquivo lá em vez de apontar para cá.
 
 Quem chama precisa conceder `contents: write` (tag e release) e `packages: write`
 (alias da imagem).
+
+### Pacotes na release
+
+Quem não publica imagem, e sim instalador (um app desktop), chama o
+[`lancar.yml`](.github/workflows/lancar.yml) direto, com três inputs a mais,
+todos opcionais. Sem eles, os passos e os comandos são os de antes.
+
+| Input | Padrão | |
+|---|---|---|
+| `artefatos` | `""` | padrão de nome dos artefatos **deste run** a anexar (`pacotes-*`, os do [empacotamento Tauri](#empacotamento-tauri-e-versão-carimbada)). |
+| `changelog` | `""` | caminho de um CHANGELOG no formato Keep a Changelog. A seção `## [<versão>]`, ou a `## [Unreleased]` se ela não existir, abre as notas; as notas dos commits vêm depois. |
+| `rascunho` | `false` | cria a release como **rascunho**: sem tag e sem publicar. |
+
+O que o job faz com eles, em ordem:
+
+1. **Confere as entradas** sem rede: `artefatos` só com `[A-Za-z0-9_.*-]`, sem
+   `/` nem espaço; `changelog` relativo, sem `..`. Os dois chegam por `env` e
+   passam por `[[ =~ ]]`, que casa a string inteira.
+2. **Baixa os pacotes antes da release** (`download-artifact`, `merge-multiple`)
+   e escreve um `SHA256SUMS` com só os nomes, feito de dentro da pasta: quem
+   baixa confere com `sha256sum -c --ignore-missing SHA256SUMS`. Padrão que não
+   casa nada, subdiretório ou nome fora de `[A-Za-z0-9._+-]` reprova.
+3. **Monta as notas** por arquivo, nunca por linha de comando.
+4. **Apaga um rascunho velho da mesma tag**, pelo id: o que sobra de um ensaio
+   ou de um run cancelado. Release publicada nunca é apagada; se já existir
+   uma, a checagem da tag reprova antes, como sempre.
+5. **Cria a release com os anexos**: o `gh release create` com arquivos cria um
+   rascunho, sobe todos e só então publica. Uma release publicada nunca fica
+   sem pacote.
+
+**O ensaio.** Um rascunho não cria a tag nem aparece para quem não tem escrita
+no repositório. É como o repositório da aplicação prova o job inteiro sem
+publicar nada: o [`ci-rust-desktop.yml`](exemplos/ci-rust-desktop.yml) dispara
+também num push em `ensaio-release/**`, e ali passa `rascunho: true`. O
+rascunho fica para alguém baixar e instalar os pacotes; o primeiro push de
+verdade na `main` o apaga e publica a release no lugar.
 
 ### Por que um script próprio
 
