@@ -544,7 +544,7 @@ arquivo lá em vez de apontar para cá.
 | `versionar` | `true` | desliga tudo isto |
 | `commits_sem_tipo` | `reprovar` | `patch` (vira correção) ou `ignorar` (não conta) |
 | `versao_inicial` | `1.0.0` | primeira tag |
-| `tag_movel_major` | `false` | também move `v1`, `v2`… — para repositório de templates e actions |
+| `tag_movel_major` | `false` | também move `v1`, `v2`… — para repositório de templates e actions. Nunca junto com `rascunho` (ver abaixo): reprova. |
 
 Quem chama precisa conceder `contents: write` (tag e release) e `packages: write`
 (alias da imagem).
@@ -559,13 +559,17 @@ todos opcionais. Sem eles, os passos e os comandos são os de antes.
 |---|---|---|
 | `artefatos` | `""` | padrão de nome dos artefatos **deste run** a anexar (`pacotes-*`, os do [empacotamento Tauri](#empacotamento-tauri-e-versão-carimbada)). |
 | `changelog` | `""` | caminho de um CHANGELOG no formato Keep a Changelog. A seção `## [<versão>]`, ou a `## [Unreleased]` se ela não existir, abre as notas; as notas dos commits vêm depois. |
-| `rascunho` | `false` | cria a release como **rascunho**: sem tag e sem publicar. |
+| `rascunho` | `false` | cria a release como **rascunho**: sem tag e sem publicar. Nunca junto com `tag_movel_major`: reprova. |
 
 O que o job faz com eles, em ordem:
 
 1. **Confere as entradas** sem rede: `artefatos` só com `[A-Za-z0-9_.*-]`, sem
    `/` nem espaço; `changelog` relativo, sem `..`. Os dois chegam por `env` e
-   passam por `[[ =~ ]]`, que casa a string inteira.
+   passam por `[[ =~ ]]`, que casa a string inteira. `rascunho` com
+   `tag_movel_major` reprova: o rascunho não cria nem a tag da versão, mas a
+   `vN` é tag de verdade, a que os consumidores usam, e o ensaio a moveria para
+   um commit que nunca passou pela `main`. O passo `Mover a tag de major` ainda
+   tem `if: inputs.tag_movel_major && !inputs.rascunho`, como segunda trava.
 2. **Baixa os pacotes antes da release** (`download-artifact`, `merge-multiple`)
    e escreve um `SHA256SUMS` com só os nomes, feito de dentro da pasta: quem
    baixa confere com `sha256sum -c --ignore-missing SHA256SUMS`. Padrão que não

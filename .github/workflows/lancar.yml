@@ -67,7 +67,7 @@ on:
         description: >-
           Tambem aponta a tag vN (v1, v2) para este commit, como fazem as actions
           do GitHub. Para repositorio de templates e actions; sem sentido para
-          servico.
+          servico. Nunca junto com `rascunho`: reprova.
         required: false
         type: boolean
         default: false
@@ -89,7 +89,7 @@ on:
       rascunho:
         description: >-
           Cria a release como rascunho: sem tag e sem publicar. Para ensaiar o
-          job fora da main.
+          job fora da main. Nunca junto com `tag_movel_major`: reprova.
         required: false
         type: boolean
         default: false
@@ -214,18 +214,29 @@ jobs:
             results-receiver.actions.githubusercontent.com:443
 
       - name: Conferir as entradas
-        # Sem arquivo, sem rede e sem outra variavel: so os quatro valores que
-        # vao virar argumento de comando ou caminho. `artefatos` vira `pattern`
-        # de uma action e `changelog`, caminho de arquivo; os dois chegam aqui
-        # por `env` e passam por `[[ =~ ]]`, que casa a string inteira (um
-        # grep casaria linha a linha e deixaria passar um valor com quebra de
-        # linha). O padrao de artefato nao tem `/`, espaco nem metacaractere
-        # de shell alem do `*`; o caminho do changelog e relativo e sem `..`.
+        # Sem arquivo, sem rede e sem outra variavel: so os valores que vao
+        # virar argumento de comando ou caminho, e uma combinacao proibida.
+        # `artefatos` vira `pattern` de uma action e `changelog`, caminho de
+        # arquivo; os dois chegam aqui por `env` e passam por `[[ =~ ]]`, que
+        # casa a string inteira (um grep casaria linha a linha e deixaria
+        # passar um valor com quebra de linha). O padrao de artefato nao tem
+        # `/`, espaco nem metacaractere de shell alem do `*`; o caminho do
+        # changelog e relativo e sem `..`.
+        #
+        # TAG MOVEL NUNCA NUM RASCUNHO. O rascunho e o ensaio fora da main: nao
+        # cria nem a tag da versao. Mas `Mover a tag de major` cria ou move a
+        # `vN` de verdade, a que os consumidores do repositorio usam, e num
+        # ensaio a apontaria para um commit que nunca passou pela main. A
+        # combinacao reprova aqui, antes de tudo; o `if` daquele passo e a
+        # segunda trava. Os dois booleanos valem `false` sem a variavel, para o
+        # script rodar sozinho fora do Actions; no job o `env` sempre os traz.
         env:
           VERSAO: ${{ inputs.versao }}
           TAG: ${{ inputs.tag }}
           ARTEFATOS: ${{ inputs.artefatos }}
           CHANGELOG: ${{ inputs.changelog }}
+          MOVEL: ${{ inputs.tag_movel_major }}
+          RASCUNHO: ${{ inputs.rascunho }}
         run: |
           set -euo pipefail
           [[ "$VERSAO" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::versao invalida: $VERSAO"; exit 1; }
@@ -239,6 +250,10 @@ jobs:
               echo "::error::changelog: caminho relativo ao repositorio, so [A-Za-z0-9_./-] e sem '..': $CHANGELOG"
               exit 1
             fi
+          fi
+          if [ "${MOVEL:-false}" = "true" ] && [ "${RASCUNHO:-false}" = "true" ]; then
+            echo "::error::tag_movel_major com rascunho: o ensaio moveria a tag vN de verdade para um commit fora da main."
+            exit 1
           fi
 
       - name: Recalcular e conferir
@@ -412,7 +427,9 @@ jobs:
           fi
 
       - name: Mover a tag de major
-        if: inputs.tag_movel_major
+        # Nunca num rascunho, que nao cria nem a tag da versao. O `Conferir as
+        # entradas` ja reprova a combinacao; este `if` e a segunda trava.
+        if: inputs.tag_movel_major && !inputs.rascunho
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
