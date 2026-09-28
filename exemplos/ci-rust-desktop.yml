@@ -28,6 +28,9 @@
 #                com o msi, o instalador NSIS e o `.zip` do CLI.
 #                Cobertura 0: o painel relata, e o piso e medido no Linux, onde
 #                o numero nao depende de codigo `cfg(windows)`.
+#   ui           `npm ci --ignore-scripts` e `npm test` no diretorio do front,
+#                no ubuntu-latest: o `qualidade` so aceita windows-* com
+#                `linguagem: rust`, a unica medida no Windows.
 #
 # A RELEASE, SO NA MAIN. Depois da `qualidade` inteira verde, o `lancar` cria
 # a tag e a release com os pacotes dos dois SOs anexados, o `SHA256SUMS` e a
@@ -35,15 +38,15 @@
 # `ensaio-release/**` ele roda com `rascunho: true`: cria um RASCUNHO, sem tag
 # e nao publico, e e como se prova o job inteiro antes do merge. O primeiro
 # push de verdade na main apaga esse rascunho e publica a release. Quem pode
-# empurrar uma branch dessas ja pode empurrar na main.
+# empurrar uma branch dessas ja pode empurrar na main. Nao ensaie perto do
+# merge: um ensaio da mesma versao rodando junto com o `lancar` da main
+# apagaria o rascunho em transito dela, e a release da main falharia sem
+# publicar (ver o cabecalho do lancar.yml).
 #
 # A VERSAO E CARIMBADA. O Cargo.toml do repositorio diz `0.0.0`, e o
 # `qualidade` escreve nele a versao que o `versao` calculou (por isso o
 # `needs`), antes do build de release: os pacotes do PR ja saem com o numero
 # que o push na main vai ter.
-#   ui           `npm ci --ignore-scripts` e `npm test` no diretorio do front,
-#                no ubuntu-latest: o `qualidade` so aceita windows-* com
-#                `linguagem: rust`, a unica medida no Windows.
 name: CI
 
 on:
@@ -119,6 +122,10 @@ jobs:
       tag: ${{ needs.versao.outputs.tag }}
       # O MESMO literal do job `versao`: se mudar, muda nos dois.
       versao_inicial: "0.1.0"
-      artefatos: "pacotes-*"
+      # So os componentes que empacotam (`pacotes-app-linux` e
+      # `pacotes-app-windows`). `pacotes-*` casaria tambem o artefato que
+      # qualquer outro job do run subisse com esse prefixo, inclusive um job
+      # que roda codigo de terceiro, como o `ui` com as dependencias npm.
+      artefatos: "pacotes-app-*"
       changelog: CHANGELOG.md
       rascunho: ${{ github.ref != 'refs/heads/main' }}

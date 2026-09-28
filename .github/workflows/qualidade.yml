@@ -69,8 +69,12 @@ name: Qualidade
 # O INPUT `versao` E A VERSAO DO PRODUTO (1.4.0), a que o job `versao` calcula.
 # O campo `versao` de um componente e outra coisa: a versao da LINGUAGEM.
 #
-# Sem os campos a partir de `so`, o componente roda os mesmos passos e comandos
-# de antes, no ubuntu-latest. So a chave do cache do `target/` ganhou o runner.
+# Sem os campos a partir de `so`, o componente roda no ubuntu-latest os passos e
+# comandos de antes, com duas diferencas em todo componente rust: a chave do
+# cache do `target/` ganhou o runner, e o passo novo `Alvo do runner` roda
+# antes do fmt. Ele guarda a tabela SO -> alvo, que antes morava no passo do
+# cargo-llvm-cov (mesma URL, mesmo hash), e um `cargo metadata --no-deps`, que
+# nao usa rede.
 
 on:
   workflow_call:
@@ -903,9 +907,9 @@ jobs:
         if: >-
           matrix.c.linguagem == 'rust'
           && (matrix.c.empacotar_tauri == true || matrix.c.binarios_extra)
-        # O contrato com o `lancar.yml`: `artefatos: "pacotes-*"` baixa todos os
-        # `pacotes-<nome>` do run e os anexa a release. Arquivos soltos na raiz
-        # do artefato. Empacotamento ligado que nao produz nada e falha, nunca
+        # O contrato com o `lancar.yml`: o `artefatos` dele casa os
+        # `pacotes-<nome>` dos componentes que empacotam (`pacotes-app-*` no
+        # exemplo) e os anexa a release. Arquivos soltos na raiz do artefato. Empacotamento ligado que nao produz nada e falha, nunca
         # um artefato vazio.
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

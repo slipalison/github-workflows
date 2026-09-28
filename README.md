@@ -199,7 +199,7 @@ esquecido não dá erro, só deixa de ter a proteção. Aqui isso é
 | Segredo varrido no **histórico inteiro** | [`seguranca.yml`](.github/workflows/seguranca.yml) | Um segredo removido do HEAD continua em qualquer clone. Achado ali significa **rotacionar**, não apagar a linha. |
 | `concurrency` com `cancel-in-progress` | exemplos | Impede que um run obsoleto ainda escreva no GitOps. |
 | Ferramenta que entra no pacote vem com sha256 | [`qualidade.yml`](.github/workflows/qualidade.yml) | O `tauri-cli`, o `cargo-llvm-cov` e o `cargo-audit` chegam como binário de versão fixa, com o sha256 conferido. O AppImage também: o bundler do Tauri baixaria sem hash o `AppRun` (o ponto de entrada do pacote), o `linuxdeploy` e o plugin de saída da release `continuous`, e o `appimagetool` baixaria o runtime da `continuous`. O passo `Ferramentas do AppImage` traz os quatro antes, de releases versionadas, e o job reprova se o bundler ainda baixar algo ou se o AppImage não começar com o runtime conferido ([detalhes](#empacotamento-tauri-e-versão-carimbada)). Nenhuma dessas releases é imutável no GitHub: o dono pode trocar o arquivo sob o mesmo nome, e é o sha256 que faz o job reprovar em vez de empacotar o arquivo trocado. No Windows, o WiX e o NSIS o bundler confere com o hash fixo no código dele, que no NSIS ainda é sha1. |
-| Tag e release só com `GITHUB_TOKEN`, no último job | [`lancar.yml`](.github/workflows/lancar.yml) | `contents: write` existe num job só, depois de todos os portões, e nunca em pull request. Nenhum PAT: tudo o que precisa da versão acontece no mesmo run. Assunto de commit e CHANGELOG são texto de terceiro — entram nas notas por arquivo, nunca por linha de comando. Os pacotes anexados levam um `SHA256SUMS`. A saída de rede do job é `block`, com quatro destinos medidos num ensaio: `github.com` (checkout), `api.github.com` (tag e release), `uploads.github.com` (anexos) e `results-receiver.actions.githubusercontent.com` (artefatos). O blob dos artefatos o harden-runner libera sozinho, pela lista de domínios do Actions em `api.github.com/meta`. |
+| Tag e release só com `GITHUB_TOKEN`, no último job | [`lancar.yml`](.github/workflows/lancar.yml) | `contents: write` existe num job só, depois de todos os portões, e nunca em pull request. Nenhum PAT: tudo o que precisa da versão acontece no mesmo run. Assunto de commit e CHANGELOG são texto de terceiro — entram nas notas por arquivo, nunca por linha de comando. Os pacotes anexados levam um `SHA256SUMS`. A saída de rede do job é `block`, com quatro destinos medidos num ensaio: `github.com` (checkout), `api.github.com` (tag e release), `uploads.github.com` (anexos) e `results-receiver.actions.githubusercontent.com` (artefatos). O egresso efetivo é maior que esses quatro: em `block`, o harden-runner 2.21.1 libera sozinho os domínios do GitHub que busca em `api.github.com/meta` (`github.com`, `*.github.com`, `*.githubapp.com`, `ghcr.io` e as 20 contas de blob `productionresultssa0..19.blob.core.windows.net`, de onde vem o zip dos artefatos). O que fica bloqueado é o resto da internet. |
 
 O CI deste repositório roda `pinar_actions.py --verificar`, que **falha** se
 algum `uses:` escapar por tag ou divergir do lock.
@@ -558,7 +558,7 @@ todos opcionais. Sem eles, os passos e os comandos são os de antes.
 
 | Input | Padrão | |
 |---|---|---|
-| `artefatos` | `""` | padrão de nome dos artefatos **deste run** a anexar (`pacotes-*`, os do [empacotamento Tauri](#empacotamento-tauri-e-versão-carimbada)). |
+| `artefatos` | `""` | padrão de nome dos artefatos **deste run** a anexar, os do [empacotamento Tauri](#empacotamento-tauri-e-versão-carimbada). Use o mais estreito que case só os componentes que empacotam (`pacotes-app-*`, e não `pacotes-*`): um padrão largo anexaria o artefato de qualquer outro job do run, inclusive de um que rode código de terceiro, como um `npm ci`. |
 | `changelog` | `""` | caminho de um CHANGELOG no formato Keep a Changelog. A seção `## [<versão>]`, ou a `## [Unreleased]` se ela não existir, abre as notas; as notas dos commits vêm depois. |
 | `rascunho` | `false` | cria a release como **rascunho**: sem tag e sem publicar. Nunca junto com `tag_movel_major`: reprova. |
 
@@ -595,6 +595,14 @@ publicar nada: o [`ci-rust-desktop.yml`](exemplos/ci-rust-desktop.yml) dispara
 também num push em `ensaio-release/**`, e ali passa `rascunho: true`. O
 rascunho fica para alguém baixar e instalar os pacotes; o primeiro push de
 verdade na `main` o apaga e publica a release no lugar.
+
+**Não ensaie perto do merge.** Com anexos, o `gh release create` da `main`
+também passa por um rascunho enquanto sobe os arquivos. Um ensaio da mesma
+versão rodando nessa hora apagaria esse rascunho em trânsito no passo
+`Apagar rascunho velho da mesma tag`, e a release da `main` falharia sem
+publicar nada. Não há perda de segurança, mas o push precisa de um run novo.
+Deixe o ensaio terminar antes do merge, e não empurre `ensaio-release/*`
+enquanto o run da `main` não acabar.
 
 ### Por que um script próprio
 
@@ -755,9 +763,12 @@ componentes: |
 | `carimbar_versao` | rust: `true` escreve o input `versao` (a do produto) no `Cargo.toml` antes do build de release e confere o `--version` de cada binário extra. |
 
 Os campos a partir de `so` são opcionais. Sem eles o componente roda os mesmos
-passos e comandos de antes, no `ubuntu-latest`. A única diferença é a chave do
-cache do `target/`, que ganhou o runner (ver abaixo): o primeiro run depois da
-mudança compila sem cache.
+passos e comandos de antes, no `ubuntu-latest`, com duas diferenças em todo
+componente rust. A chave do cache do `target/` ganhou o runner (ver abaixo), e
+o primeiro run depois da mudança compila sem cache. E o passo novo `Alvo do
+runner` roda antes do fmt: guarda a tabela SO → alvo, que antes morava no
+passo do `cargo-llvm-cov` (mesma URL, mesmo hash), e faz um `cargo metadata
+--no-deps`, sem rede.
 
 O `qualidade.yml` também recebe o input `versao`, a versão do **produto**
 (`1.4.0`), a que o job `versao` calculou. Não confundir com o campo `versao` de

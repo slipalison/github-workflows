@@ -30,17 +30,26 @@ name: Lancar versao
 #
 # PACOTES, SOMAS, CHANGELOG E RASCUNHO — tudo opcional
 # ----------------------------------------------------
-# `artefatos` e um padrao de nome de artefato DESTE run (`pacotes-*`): os
-# arquivos sao baixados ANTES da release, entram nela como anexos junto de um
-# `SHA256SUMS`, e o `gh release create` so publica depois de subir todos — uma
-# release publicada nunca fica sem pacote. `changelog` e o caminho de um
-# CHANGELOG no formato Keep a Changelog: a secao `## [<versao>]`, ou a
-# `## [Unreleased]` se ela nao existir, abre as notas. `rascunho: true` cria a
-# release como RASCUNHO, que nao cria a tag e nao e publico: e como um
-# repositorio ensaia o job inteiro fora da main. Antes de criar, um rascunho
-# que ja exista com a MESMA tag e apagado (o que sobra de um ensaio ou de um
-# run cancelado); release publicada nunca. Sem os tres, os passos e comandos
-# sao os de antes.
+# `artefatos` e um padrao de nome de artefato DESTE run, o mais estreito que
+# case so os componentes que empacotam (`pacotes-app-*`, e nao `pacotes-*`):
+# um padrao largo anexaria o artefato de qualquer outro job do run, inclusive
+# de um que rode codigo de terceiro, como um `npm ci`. Os arquivos sao
+# baixados ANTES da release, entram nela como anexos junto de um `SHA256SUMS`,
+# e o `gh release create` so publica depois de subir todos — uma release
+# publicada nunca fica sem pacote. `changelog` e o caminho de um CHANGELOG no
+# formato Keep a Changelog: a secao `## [<versao>]`, ou a `## [Unreleased]` se
+# ela nao existir, abre as notas. `rascunho: true` cria a release como
+# RASCUNHO, que nao cria a tag e nao e publico: e como um repositorio ensaia o
+# job inteiro fora da main. Antes de criar, um rascunho que ja exista com a
+# MESMA tag e apagado (o que sobra de um ensaio ou de um run cancelado);
+# release publicada nunca. Sem os tres, os passos e comandos sao os de antes.
+#
+# NAO ENSAIE PERTO DO MERGE. Com anexos, o `gh release create` da main tambem
+# passa por um rascunho enquanto sobe os arquivos. Um ensaio da MESMA versao
+# rodando nessa hora o apagaria no `Apagar rascunho velho`, e a release da
+# main falharia sem publicar nada (sem perda de seguranca, mas o push precisa
+# de um run novo). Deixe o ensaio terminar antes do merge, e nao empurre
+# `ensaio-release/*` enquanto o run da main nao acabar.
 
 on:
   workflow_call:
@@ -81,8 +90,8 @@ on:
         default: "1.0.0"
       artefatos:
         description: >-
-          Padrao de nome dos artefatos deste run a anexar a release
-          (`pacotes-*`). Vazio nao baixa nem anexa nada.
+          Padrao de nome dos artefatos deste run a anexar a release, o mais
+          estreito possivel (`pacotes-app-*`). Vazio nao baixa nem anexa nada.
         required: false
         type: string
         default: ""
@@ -201,11 +210,14 @@ jobs:
           #   uploads.github.com  o `gh release create` subindo os anexos
           #   results-receiver.actions.githubusercontent.com
           #                       `Baixar pacotes`: o servico de artefatos
-          # O blob dos artefatos (productionresultssa0..19.blob.core.windows.net,
-          # medido o sa3) nao entra: o harden-runner o libera sozinho em
-          # `block`, porque vem da lista de dominios do Actions em
-          # api.github.com/meta, que o agente busca e mostra no mesmo log
-          # (`fetched GitHub meta domains`).
+          # O EGRESSO REAL E MAIOR QUE ESTA LISTA. Em `block`, o harden-runner
+          # 2.21.1 libera sozinho os dominios do GitHub que busca em
+          # api.github.com/meta e mostra no log (`fetched GitHub meta
+          # domains`, ensaio 36435174227): github.com, *.github.com (que ja
+          # cobre api. e uploads.), *.githubapp.com, ghcr.io e as 20 contas de
+          # blob productionresultssa0..19.blob.core.windows.net, de onde vem o
+          # zip dos artefatos (medido o sa3). A lista abaixo e o que o job USA,
+          # medido; o que fica bloqueado e todo o resto da internet.
           egresso: block
           destinos-liberados: |
             github.com:443
@@ -377,7 +389,9 @@ jobs:
         # com a tag desta versao. Rascunho nao cria tag, entao a checagem de
         # cima nao o ve, e a release nova nasceria ao lado dele. Apaga so
         # rascunho com a MESMA tag, pelo id; release publicada nunca. A tag
-        # passou pela regex em `Conferir as entradas`.
+        # passou pela regex em `Conferir as entradas`. Um ensaio rodando junto
+        # com o lancar da main apagaria o rascunho em transito dela: ver "NAO
+        # ENSAIE PERTO DO MERGE" no cabecalho.
         if: inputs.artefatos != '' || inputs.rascunho
         env:
           GH_TOKEN: ${{ github.token }}
