@@ -51,6 +51,17 @@ name: Pipeline
 # Commit fora do padrao REPROVA `versao`, e com ele o portao e a publicacao. E o
 # padrao, de proposito: um commit sem tipo virando patch em silencio seria uma
 # quebra de contrato publicada como correcao. `commits_sem_tipo` afrouxa.
+#
+# APP DESKTOP TAMBEM ENTRA POR AQUI
+# ---------------------------------
+# Sem `imagem` e sem `app`, os jobs `imagem` e `publicar` saem pulados e o resto
+# e a esteira inteira. O que um instalador precisa a mais passa por inputs:
+# `timeout_qualidade` (o Tauri sem cache estoura os 20 minutos padrao),
+# `artefatos_release` e `changelog` (os pacotes e as notas da release) e
+# `ramo_de_ensaio` (a release inteira como rascunho, antes do merge). O
+# `ddc-control` chamou `versao`, `qualidade` e `lancar` avulsos ate 2026-09-28
+# e publicou a v0.1.0 sem varredura de seguranca, sem Sonar e sem portao —
+# nada no painel dizia que faltavam. E o exemplo `ci-rust-desktop.yml`.
 
 on:
   workflow_call:
@@ -78,6 +89,33 @@ on:
         required: false
         type: boolean
         default: false
+      artefatos_release:
+        description: >-
+          Padrao de nome dos artefatos DESTE run anexados a release, como os
+          `pacotes-<componente>` do empacotamento Tauri. Vazio: release sem
+          anexos. E o `artefatos` do lancar.yml; use o padrao mais estreito que
+          case so os componentes que empacotam.
+        required: false
+        type: string
+        default: ""
+      changelog:
+        description: >-
+          CHANGELOG no formato Keep a Changelog, relativo a raiz. A secao da
+          versao (ou a `[Unreleased]`) abre as notas da release. Vazio: so as
+          notas dos commits.
+        required: false
+        type: string
+        default: ""
+      ramo_de_ensaio:
+        description: >-
+          Prefixo de branch, ex.: `ensaio-release/`. Um push numa branch que
+          comeca com ele roda o `lancar` como RASCUNHO: sem tag, sem publicar,
+          sem mover a tag de major e sem deploy. Prova a release inteira antes
+          do merge. Vazio desliga. O `on: push` de quem chama precisa incluir a
+          branch.
+        required: false
+        type: string
+        default: ""
 
       # ----------------------------------------------------------- qualidade --
       componentes:
@@ -87,6 +125,14 @@ on:
         required: false
         type: string
         default: '[{"nome":"app","linguagem":"python"}]'
+      timeout_qualidade:
+        description: >-
+          Minutos de cada job de qualidade. Os 20 do padrao nao bastam para um
+          app Tauri sem cache no Windows (13 min no primeiro run do
+          ddc-control).
+        required: false
+        type: number
+        default: 20
 
       # -------------------------------------------------------------- imagem --
       imagem:
@@ -133,6 +179,13 @@ on:
         required: false
         type: string
         default: "nenhuma"
+      sonar_versao_linguagem:
+        description: >-
+          Versao da linguagem no job do Sonar, como o `versao` de um
+          componente. Em Rust e o toolchain do Clippy que o Sonar roda.
+        required: false
+        type: string
+        default: ""
       sonar_projeto_dotnet:
         required: false
         type: string
@@ -142,6 +195,11 @@ on:
         type: string
         default: ""
       sonar_parametros:
+        required: false
+        type: string
+        default: ""
+      sonar_pacotes_sistema:
+        description: "Pacotes apt do job do Sonar. Ver `pacotes_sistema` no sonar.yml."
         required: false
         type: string
         default: ""
@@ -240,9 +298,21 @@ jobs:
       versao_inicial: ${{ inputs.versao_inicial }}
 
   qualidade:
+    # Espera o `versao` por um motivo so: o componente com `carimbar_versao`
+    # escreve no pacote a versao que ele calculou. Custa o relogio do `versao`,
+    # 16 s entre o inicio dele e o da qualidade no ddc-control (run
+    # 36453793875); os outros jobs nao esperam, e o Sonar costuma ser o mais
+    # lento. `!cancelled()`: com o `versao` reprovado (commit fora do padrao)
+    # ou pulado (`versionar: false`), os testes rodam assim mesmo, e o mesmo
+    # run mostra os dois problemas. So o componente que carimba reprova sem
+    # versao, no primeiro passo, dizendo por que.
+    needs: [versao]
+    if: ${{ !cancelled() }}
     uses: slipalison/github-workflows/.github/workflows/qualidade.yml@main
     with:
       componentes: ${{ inputs.componentes }}
+      timeout: ${{ inputs.timeout_qualidade }}
+      versao: ${{ needs.versao.outputs.versao }}
     secrets:
       GH_PACKAGES_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
 
@@ -274,9 +344,11 @@ jobs:
       host: ${{ inputs.sonar_host }}
       modo: ${{ inputs.sonar_modo }}
       linguagem: ${{ inputs.sonar_linguagem }}
+      versao_linguagem: ${{ inputs.sonar_versao_linguagem }}
       projeto_dotnet: ${{ inputs.sonar_projeto_dotnet }}
       comando_testes: ${{ inputs.sonar_comando_testes }}
       parametros: ${{ inputs.sonar_parametros }}
+      pacotes_sistema: ${{ inputs.sonar_pacotes_sistema }}
       exigir_token: ${{ inputs.sonar_exigir_token }}
     secrets:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
@@ -335,12 +407,19 @@ jobs:
     # O ultimo. Depois de todos os portoes E depois do GitOps: a tag e a prova de
     # que o commit passou por tudo e chegou ao cluster. `salto == nenhum` (HEAD
     # ja tageado, run repetido) nao cria nada.
+    #
+    # Numa branch de `ramo_de_ensaio`, o mesmo job com `rascunho: true`: sem
+    # tag, sem publicar. `inputs.ramo_de_ensaio != ''` vem ANTES do
+    # `startsWith`, porque com ele vazio o prefixo seria `refs/heads/` e
+    # casaria toda branch. O `publicar` continua so na de producao.
     needs: [versao, qualidade, imagem, sonar, seguranca, publicar]
     if: >-
       always()
       && inputs.versionar
       && github.event_name != 'pull_request'
-      && github.ref == format('refs/heads/{0}', inputs.branch_de_producao)
+      && (github.ref == format('refs/heads/{0}', inputs.branch_de_producao)
+          || (inputs.ramo_de_ensaio != ''
+              && startsWith(github.ref, format('refs/heads/{0}', inputs.ramo_de_ensaio))))
       && needs.versao.result == 'success'
       && needs.versao.outputs.salto != 'nenhum'
       && needs.qualidade.result == 'success'
@@ -359,9 +438,15 @@ jobs:
       tag: ${{ needs.versao.outputs.tag }}
       imagem: ${{ needs.imagem.result == 'success' && inputs.imagem || '' }}
       digest: ${{ needs.imagem.outputs.digest }}
-      tag_movel_major: ${{ inputs.tag_movel_major }}
+      # A `vN` e tag de verdade, a que os consumidores usam: so na producao. O
+      # lancar.yml reprova `rascunho` junto com `tag_movel_major`, e o ensaio
+      # nao tem o que mover.
+      tag_movel_major: ${{ inputs.tag_movel_major && github.ref == format('refs/heads/{0}', inputs.branch_de_producao) }}
       commits_sem_tipo: ${{ inputs.commits_sem_tipo }}
       versao_inicial: ${{ inputs.versao_inicial }}
+      artefatos: ${{ inputs.artefatos_release }}
+      changelog: ${{ inputs.changelog }}
+      rascunho: ${{ github.ref != format('refs/heads/{0}', inputs.branch_de_producao) }}
 
   # Um unico check para marcar como obrigatorio na protecao de branch. Sem isto
   # a lista de checks obrigatorios precisa nomear cada job, e um job novo entra
