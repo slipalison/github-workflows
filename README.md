@@ -702,9 +702,19 @@ componentes: |
 | `pacotes_sistema` | pacotes apt separados por espaço, instalados antes do build. Só em runner Linux; a lista passa por regex e chega ao `apt-get` por `env`. |
 | `auditoria` | rust: `true` roda `cargo audit`. Só em runner Linux. |
 | `build_release` | rust: um pacote do workspace; o passo `Build <pacote> (release)` roda `cargo build -p <pacote> --release --locked`. |
+| `empacotar_tauri` | rust: `true` empacota o app Tauri de `build_release` com o `cargo tauri build`: deb, rpm e AppImage no Linux; msi e instalador NSIS no Windows. Exige `build_release` e `caminho_tauri`. |
+| `caminho_tauri` | diretório do `tauri.conf.json`, relativo à raiz do checkout. Só com `empacotar_tauri`. |
+| `binarios_extra` | rust: pacotes do workspace, separados por espaço, publicados como arquivo: `<bin>-<alvo>.tar.gz` no Linux, `<bin>-<alvo>.zip` no Windows, com o binário e o `LICENSE` da raiz. |
+| `carimbar_versao` | rust: `true` escreve o input `versao` (a do produto) no `Cargo.toml` antes do build de release e confere o `--version` de cada binário extra. |
 
-Os quatro últimos são opcionais. Sem eles o componente roda os mesmos passos e
-comandos de antes, no `ubuntu-latest`.
+Os campos a partir de `so` são opcionais. Sem eles o componente roda os mesmos
+passos e comandos de antes, no `ubuntu-latest`. A única diferença é a chave do
+cache do `target/`, que ganhou o runner (ver abaixo): o primeiro run depois da
+mudança compila sem cache.
+
+O `qualidade.yml` também recebe o input `versao`, a versão do **produto**
+(`1.4.0`), a que o job `versao` calculou. Não confundir com o campo `versao` de
+um componente, que é a versão da linguagem. Só `carimbar_versao` o lê.
 
 `fail-fast: false` de propósito: o padrão mata os outros componentes quando um
 falha e mostra só o primeiro erro — com três componentes, isso vira três rodadas
@@ -783,13 +793,57 @@ teste. Só um `cargo build --release --locked` prova que o binário de produçã
 compila — no Tauri, com `custom-protocol` e os recursos do Windows. O passo
 vem depois dos testes e se chama `Build <pacote> (release)`.
 
-**Binário pronto, versão fixa, hash conferido.** O `cargo-llvm-cov` (0.9.1) e
-o `cargo-audit` (0.22.2) chegam como binário publicado na release de cada
-projeto, e não por `cargo install`, que levaria minutos compilando a ferramenta
-na versão que o crates.io tiver hoje. A versão fixa diz o que baixar. O sha256,
-tirado do `digest` que o GitHub mostra em cada arquivo da release, prova que
-chegou isso. Arquivo que não bate não é extraído. Para subir uma delas, troque
-a versão e o hash juntos, num PR.
+**Binário pronto, versão fixa, hash conferido.** O `cargo-llvm-cov` (0.9.1),
+o `cargo-audit` (0.22.2) e o `tauri-cli` (2.12.0) chegam como binário publicado
+na release de cada projeto, e não por `cargo install`, que levaria minutos
+compilando a ferramenta na versão que o crates.io tiver hoje. A versão fixa diz
+o que baixar. O sha256, tirado do `digest` que o GitHub mostra em cada arquivo
+da release, prova que chegou isso. Arquivo que não bate não é extraído. Para
+subir uma delas, troque a versão e o hash juntos, num PR.
+
+#### Empacotamento Tauri e versão carimbada
+
+Entrou em 2026-09-28, também com o `ddc-control`: o CI que só compila e testa
+não entrega nada para quem quer instalar. Com os quatro campos novos, o mesmo
+job que testou produz os instaladores, e o `lancar.yml` os anexa à release
+(ver [Pacotes na release](#pacotes-na-release)).
+
+**A versão é carimbada, não escrita.** O `Cargo.toml` do repositório diz
+`0.0.0`, e o passo `Carimbar versao` escreve nele a versão que o job `versao`
+calculou, antes do build de release. É a mesma ideia do `helm package
+--version` do `helm-charts`: nenhum número escrito à mão e nenhum commit de bot
+na `main`. Só o `version` do `[workspace.package]` (ou do `[package]`) muda; o
+`Cargo.lock` acompanha com `cargo update --workspace --offline`, e o passo
+reprova se o lock mudar em qualquer linha além das `version` dos membros. Em
+pull request a versão carimbada é a que o push vai ter, então os artefatos do
+PR já são os pacotes da próxima release. `Conferir versao dos binarios` executa
+cada binário extra com `--version` (o `.exe` no Windows) e reprova se a versão
+não aparecer. O limite do MSI (major e minor até 255, patch até 65535) reprova
+no primeiro passo, antes do checkout.
+
+**Os passos, depois dos testes:** `Carimbar versao`, `Build <pacote> (release)`,
+`Build binarios extra (release)`, `Conferir versao dos binarios`, `Empacotar
+binarios extra`, `Instalar tauri-cli`, `Empacotar <pacote> (Tauri)` e
+`Guardar pacotes`. Os nomes são contrato: quem chama pode consultá-los pela API.
+
+**Um arquivo por bundler, com a versão no nome e sem espaço.** O Tauri nomeia
+os pacotes pelo `productName` (`DDC Control_0.1.0_amd64.deb`). O passo apaga o
+`bundle/` antigo do `target/` (o cache traz pacotes de runs anteriores), exige
+exatamente um arquivo por bundler, põe o nome do produto em minúsculas com `-`
+no lugar de espaço (`ddc-control_0.1.0_amd64.deb`) e reprova nome sem a versão.
+Tudo vai para `dist/`, na raiz do checkout, e dali para o artefato
+`pacotes-<nome>`. Os binários extra entram no mesmo artefato, como
+`<bin>-<alvo>.tar.gz` ou `.zip` com só o binário e o `LICENSE`. O alvo sai de
+uma tabela só, no passo `Alvo do runner`, que o `cargo-llvm-cov` também lê.
+
+**Linux no `ubuntu-22.04`.** Os pacotes ligam dinamicamente na glibc de onde
+foram construídos: feitos no `ubuntu-latest` (24.04, glibc 2.39), não rodariam
+no Ubuntu 22.04 nem no Debian 12. Por isso o componente Linux que empacota usa
+`so: ubuntu-22.04`, e a chave do cache do `target/` leva o runner: um `target/`
+do 24.04 restaurado no 22.04 desfaria isso calado.
+
+**No Windows**, o Git Bash não traz `zip`: o `.zip` do binário extra sai do
+7-Zip da imagem do runner, que também abre o `.zip` do `tauri-cli`.
 
 ---
 

@@ -12,16 +12,27 @@
 #
 # O QUE CADA COMPONENTE PROVA
 # ---------------------------
-#   app-linux    fmt, `cargo audit`, clippy, testes com piso de cobertura e o
-#                binario de release. `pacotes_sistema` traz o que o webview do
-#                Tauri linka no Linux (WebKitGTK) e o libudev de quem fala com
-#                hardware; nada disso vem na imagem do runner. A auditoria le as
-#                excecoes do `.cargo/audit.toml` do repositorio, cada uma com o
-#                motivo escrito ao lado.
+#   app-linux    fmt, `cargo audit`, clippy, testes com piso de cobertura, o
+#                binario de release e os pacotes deb, rpm e AppImage, mais o
+#                `.tar.gz` do CLI. `pacotes_sistema` traz o que o webview do
+#                Tauri linka no Linux (WebKitGTK), o libudev de quem fala com
+#                hardware e o librsvg que o plugin gtk do AppImage procura pelo
+#                pkg-config; nada disso vem na imagem do runner. A auditoria le
+#                as excecoes do `.cargo/audit.toml` do repositorio, cada uma
+#                com o motivo escrito ao lado.
+#                `so: ubuntu-22.04`, e nao o latest: o pacote liga na glibc de
+#                onde foi construido, e o do 24.04 (glibc 2.39) nao roda no
+#                Ubuntu 22.04 nem no Debian 12.
 #   app-windows  os mesmos passos no windows-latest, menos a auditoria (o
-#                Cargo.lock e o mesmo: auditar de novo nao prova nada novo).
+#                Cargo.lock e o mesmo: auditar de novo nao prova nada novo),
+#                com o msi, o instalador NSIS e o `.zip` do CLI.
 #                Cobertura 0: o painel relata, e o piso e medido no Linux, onde
 #                o numero nao depende de codigo `cfg(windows)`.
+#
+# A VERSAO E CARIMBADA. O Cargo.toml do repositorio diz `0.0.0`, e o
+# `qualidade` escreve nele a versao que o `versao` calculou (por isso o
+# `needs`), antes do build de release: os pacotes do PR ja saem com o numero
+# que o push na main vai ter.
 #   ui           `npm ci --ignore-scripts` e `npm test` no diretorio do front,
 #                no ubuntu-latest: o `qualidade` so aceita windows-* com
 #                `linguagem: rust`, a unica medida no Windows.
@@ -52,6 +63,7 @@ jobs:
       versao_inicial: "0.1.0"
 
   qualidade:
+    needs: [versao]
     permissions:
       contents: read
     uses: slipalison/github-workflows/.github/workflows/qualidade.yml@main
@@ -59,15 +71,24 @@ jobs:
       # O Tauri compila tres vezes no Windows (clippy, llvm-cov e release), e
       # o primeiro run nao tem cache: os 20 minutos padrao nao bastam.
       timeout: 60
-      # `versao` fixa o toolchain: o clippy do CI e o mesmo da maquina de quem
-      # commitou, e um lint novo do stable nao reprova o PR de ninguem.
-      # `build_release` nomeia o pacote do binario do app no workspace.
+      # A versao do PRODUTO, para o carimbo. O `versao` de cada componente e
+      # outra coisa: fixa o toolchain, para o clippy do CI ser o mesmo da
+      # maquina de quem commitou.
+      versao: ${{ needs.versao.outputs.versao }}
+      # `build_release` nomeia o pacote do binario do app no workspace, e o
+      # Tauri empacota esse mesmo pacote; `caminho_tauri` e onde mora o
+      # tauri.conf.json. `binarios_extra` e o CLI que vai solto na release.
       componentes: |
         [
           {"nome":"app-linux","linguagem":"rust","versao":"1.98","cobertura":80,
-           "pacotes_sistema":"libwebkit2gtk-4.1-dev libudev-dev",
-           "auditoria":true,"build_release":"meu-app"},
+           "so":"ubuntu-22.04",
+           "pacotes_sistema":"libwebkit2gtk-4.1-dev libudev-dev librsvg2-dev",
+           "auditoria":true,"build_release":"meu-app",
+           "empacotar_tauri":true,"caminho_tauri":"apps/meu-app/src-tauri",
+           "binarios_extra":"meu-cli","carimbar_versao":true},
           {"nome":"app-windows","linguagem":"rust","versao":"1.98","so":"windows-latest",
-           "cobertura":0,"build_release":"meu-app"},
+           "cobertura":0,"build_release":"meu-app",
+           "empacotar_tauri":true,"caminho_tauri":"apps/meu-app/src-tauri",
+           "binarios_extra":"meu-cli","carimbar_versao":true},
           {"nome":"ui","linguagem":"node","versao":"24","caminho":"ui"}
         ]
