@@ -313,7 +313,7 @@ jobs:
     if: inputs.versionar
     permissions:
       contents: read
-    uses: slipalison/github-workflows/.github/workflows/versao.yml@main
+    uses: slipalison/github-workflows/.github/workflows/versao.yml@ad8a96e423e1d8f44eafa50a43556cd614da0a77
     with:
       commits_sem_tipo: ${{ inputs.commits_sem_tipo }}
       versao_inicial: ${{ inputs.versao_inicial }}
@@ -329,7 +329,7 @@ jobs:
     # versao, no primeiro passo, dizendo por que.
     needs: [versao]
     if: ${{ !cancelled() }}
-    uses: slipalison/github-workflows/.github/workflows/qualidade.yml@main
+    uses: slipalison/github-workflows/.github/workflows/qualidade.yml@ad8a96e423e1d8f44eafa50a43556cd614da0a77
     with:
       componentes: ${{ inputs.componentes }}
       timeout: ${{ inputs.timeout_qualidade }}
@@ -343,7 +343,7 @@ jobs:
       contents: read
       packages: write
       security-events: write
-    uses: slipalison/github-workflows/.github/workflows/build-push.yml@main
+    uses: slipalison/github-workflows/.github/workflows/build-push.yml@ad8a96e423e1d8f44eafa50a43556cd614da0a77
     with:
       image: ${{ inputs.imagem }}
       context: ${{ inputs.contexto_build }}
@@ -358,7 +358,7 @@ jobs:
     if: inputs.sonar_projeto != ''
     permissions:
       contents: read
-    uses: slipalison/github-workflows/.github/workflows/sonar.yml@main
+    uses: slipalison/github-workflows/.github/workflows/sonar.yml@ad8a96e423e1d8f44eafa50a43556cd614da0a77
     with:
       projeto: ${{ inputs.sonar_projeto }}
       organizacao: ${{ inputs.sonar_organizacao }}
@@ -387,7 +387,7 @@ jobs:
       contents: read
       security-events: write
       actions: read
-    uses: slipalison/github-workflows/.github/workflows/seguranca.yml@main
+    uses: slipalison/github-workflows/.github/workflows/seguranca.yml@ad8a96e423e1d8f44eafa50a43556cd614da0a77
     with:
       linguagens_codeql: ${{ inputs.linguagens_codeql }}
       caminho_iac: ${{ inputs.caminho_iac }}
@@ -414,7 +414,7 @@ jobs:
       && (needs.sonar.result == 'success' || needs.sonar.result == 'skipped')
     permissions:
       contents: read
-    uses: slipalison/github-workflows/.github/workflows/deploy.yml@main
+    uses: slipalison/github-workflows/.github/workflows/deploy.yml@ad8a96e423e1d8f44eafa50a43556cd614da0a77
     with:
       app: ${{ inputs.app }}
       tag: ${{ needs.imagem.outputs.tag }}
@@ -453,7 +453,7 @@ jobs:
     permissions:
       contents: write
       packages: write
-    uses: slipalison/github-workflows/.github/workflows/lancar.yml@main
+    uses: slipalison/github-workflows/.github/workflows/lancar.yml@ad8a96e423e1d8f44eafa50a43556cd614da0a77
     with:
       versao: ${{ needs.versao.outputs.versao }}
       tag: ${{ needs.versao.outputs.tag }}
