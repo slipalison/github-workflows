@@ -220,8 +220,11 @@ jobs:
         # arquivo; os dois chegam aqui por `env` e passam por `[[ =~ ]]`, que
         # casa a string inteira (um grep casaria linha a linha e deixaria
         # passar um valor com quebra de linha). O padrao de artefato nao tem
-        # `/`, espaco nem metacaractere de shell alem do `*`; o caminho do
-        # changelog e relativo e sem `..`.
+        # `/`, espaco nem metacaractere de shell alem do `*`.
+        #
+        # O CHANGELOG E RELATIVO AO REPOSITORIO: sem `/` no comeco e sem `..`.
+        # A secao dele vai para o corpo PUBLICO da release, e um caminho
+        # absoluto (`/etc/passwd`) publicaria um arquivo qualquer do runner.
         #
         # TAG MOVEL NUNCA NUM RASCUNHO. O rascunho e o ensaio fora da main: nao
         # cria nem a tag da versao. Mas `Mover a tag de major` cria ou move a
@@ -246,8 +249,8 @@ jobs:
             exit 1
           fi
           if [ -n "$CHANGELOG" ]; then
-            if ! [[ "$CHANGELOG" =~ ^[A-Za-z0-9_./-]+$ ]] || [[ "$CHANGELOG" == *..* ]]; then
-              echo "::error::changelog: caminho relativo ao repositorio, so [A-Za-z0-9_./-] e sem '..': $CHANGELOG"
+            if ! [[ "$CHANGELOG" =~ ^[A-Za-z0-9_./-]+$ ]] || [[ "$CHANGELOG" == /* ]] || [[ "$CHANGELOG" == *..* ]]; then
+              echo "::error::changelog: caminho relativo ao repositorio, so [A-Za-z0-9_./-], sem '/' no comeco e sem '..': $CHANGELOG"
               exit 1
             fi
           fi

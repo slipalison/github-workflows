@@ -51,9 +51,9 @@ name: Qualidade
 #                `pacotes-<nome>`, com o nome do produto em minusculas e `-` no
 #                lugar de espaco (`ddc-control_0.1.0_amd64.deb`).
 #   caminho_tauri
-#                diretorio do tauri.conf.json, relativo a raiz do checkout. O
-#                `caminho` do componente e o do workspace, e o app Tauri costuma
-#                morar num subdiretorio dele.
+#                diretorio do tauri.conf.json, relativo a raiz do checkout (sem
+#                `/` no comeco e sem `..`). O `caminho` do componente e o do
+#                workspace, e o app Tauri costuma morar num subdiretorio dele.
 #   binarios_extra
 #                rust: pacotes do workspace, separados por espaco, compilados em
 #                release e publicados no mesmo artefato: `<bin>-<alvo>.tar.gz`
@@ -212,12 +212,16 @@ jobs:
             [ -n "$CAMINHO_TAURI" ] ||
               reprovar "empacotar_tauri: exige caminho_tauri, o diretorio do tauri.conf.json."
           fi
+          # Relativo ao checkout: o `cd` do passo Tauri e o `cargo tauri build`
+          # rodam la dentro, e um caminho absoluto levaria o build para fora
+          # do repositorio.
           re_caminho='^[A-Za-z0-9_./-]+$'
           if [ -n "$CAMINHO_TAURI" ]; then
             [ "$TAURI" = "true" ] ||
               reprovar "caminho_tauri: so com empacotar_tauri: true."
-            if ! [[ $CAMINHO_TAURI =~ $re_caminho ]] || [[ $CAMINHO_TAURI == *..* ]]; then
-              reprovar "caminho_tauri: caminho relativo ao checkout ($re_caminho), sem '..'."
+            if ! [[ $CAMINHO_TAURI =~ $re_caminho ]] || [[ $CAMINHO_TAURI == /* ]] ||
+               [[ $CAMINHO_TAURI == *..* ]]; then
+              reprovar "caminho_tauri: caminho relativo ao checkout ($re_caminho), sem '/' no comeco e sem '..'."
             fi
           fi
           re_binarios='^[A-Za-z0-9_-]+( [A-Za-z0-9_-]+)*$'

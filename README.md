@@ -564,7 +564,9 @@ todos opcionais. Sem eles, os passos e os comandos são os de antes.
 O que o job faz com eles, em ordem:
 
 1. **Confere as entradas** sem rede: `artefatos` só com `[A-Za-z0-9_.*-]`, sem
-   `/` nem espaço; `changelog` relativo, sem `..`. Os dois chegam por `env` e
+   `/` nem espaço; `changelog` relativo, sem `/` no começo e sem `..`: a seção
+   dele vai para o corpo público da release, e um caminho absoluto publicaria
+   um arquivo qualquer do runner. Os dois chegam por `env` e
    passam por `[[ =~ ]]`, que casa a string inteira. `rascunho` com
    `tag_movel_major` reprova: o rascunho não cria nem a tag da versão, mas a
    `vN` é tag de verdade, a que os consumidores usam, e o ensaio a moveria para
@@ -747,7 +749,7 @@ componentes: |
 | `auditoria` | rust: `true` roda `cargo audit`. Só em runner Linux. |
 | `build_release` | rust: um pacote do workspace; o passo `Build <pacote> (release)` roda `cargo build -p <pacote> --release --locked`. |
 | `empacotar_tauri` | rust: `true` empacota o app Tauri de `build_release` com o `cargo tauri build`: deb, rpm e AppImage no Linux; msi e instalador NSIS no Windows. Exige `build_release` e `caminho_tauri`. |
-| `caminho_tauri` | diretório do `tauri.conf.json`, relativo à raiz do checkout. Só com `empacotar_tauri`. |
+| `caminho_tauri` | diretório do `tauri.conf.json`, relativo à raiz do checkout, sem `/` no começo e sem `..`. Só com `empacotar_tauri`. |
 | `binarios_extra` | rust: pacotes do workspace, separados por espaço, publicados como arquivo: `<bin>-<alvo>.tar.gz` no Linux, `<bin>-<alvo>.zip` no Windows, com o binário e o `LICENSE` da raiz. |
 | `carimbar_versao` | rust: `true` escreve o input `versao` (a do produto) no `Cargo.toml` antes do build de release e confere o `--version` de cada binário extra. |
 
