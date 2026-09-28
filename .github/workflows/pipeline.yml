@@ -52,6 +52,16 @@ name: Pipeline
 # padrao, de proposito: um commit sem tipo virando patch em silencio seria uma
 # quebra de contrato publicada como correcao. `commits_sem_tipo` afrouxa.
 #
+# O QUE NAO SE DESLIGA EM SILENCIO
+# --------------------------------
+# `qualidade` e `seguranca` rodam sempre. O Sonar roda quando ha
+# `sonar_projeto`; sem ele, o repositorio escreve o motivo em `sonar_dispensa`,
+# e sem nenhum dos dois o `portao` REPROVA. Antes de 2026-09-28 um
+# `sonar_projeto` vazio pulava o Sonar e o portao marcava "desligada", com a
+# mesma cara de uma decisao consciente. Um controle que some por esquecimento
+# e a falha que o `sonar.yml` ja recusa no token; aqui ela e recusada um nivel
+# acima.
+#
 # APP DESKTOP TAMBEM ENTRA POR AQUI
 # ---------------------------------
 # Sem `imagem` e sem `app`, os jobs `imagem` e `publicar` saem pulados e o resto
@@ -159,7 +169,17 @@ on:
 
       # --------------------------------------------------------------- sonar --
       sonar_projeto:
-        description: "sonar.projectKey. Vazio pula o Sonar."
+        description: >-
+          sonar.projectKey. Vazio pula o Sonar, e entao `sonar_dispensa` e
+          obrigatorio: sem nenhum dos dois o portao reprova.
+        required: false
+        type: string
+        default: ""
+      sonar_dispensa:
+        description: >-
+          O MOTIVO de o repositorio nao passar pelo Sonar, em uma linha. So com
+          `sonar_projeto` vazio; os dois juntos reprovam. Aparece no painel do
+          portao e num `::warning::` em todo run.
         required: false
         type: string
         default: ""
@@ -466,9 +486,31 @@ jobs:
             imagem=${{ needs.imagem.result }}
             sonar=${{ needs.sonar.result }}
             seguranca=${{ needs.seguranca.result }}
+          # Por `env`: o motivo e texto de quem chama.
+          SONAR_PROJETO: ${{ inputs.sonar_projeto }}
+          SONAR_DISPENSA: ${{ inputs.sonar_dispensa }}
         run: |
           set -euo pipefail
           falhou=0
+          # O Sonar so sai `skipped` sem `sonar_projeto`, e ai precisa de um
+          # motivo escrito (ver "O QUE NAO SE DESLIGA EM SILENCIO" no
+          # cabecalho). O motivo vira uma linha: numa anotacao, uma quebra de
+          # linha abriria outro comando do runner, e `%` se escreve `%25`; na
+          # tabela, `|` abriria outra coluna.
+          marca_sonar=""
+          if [ -n "$SONAR_PROJETO" ] && [ -n "$SONAR_DISPENSA" ]; then
+            echo "::error::sonar_projeto e sonar_dispensa juntos: ou o Sonar roda, ou o motivo de nao rodar fica escrito. Os dois nao dizem qual vale."
+            marca_sonar="**ligado e dispensado ao mesmo tempo**"
+            falhou=1
+          elif [ -z "$SONAR_PROJETO" ] && [ -z "$SONAR_DISPENSA" ]; then
+            echo "::error::Sonar desligado sem motivo. Passe sonar_projeto (com o secret SONAR_TOKEN), ou sonar_dispensa com o motivo de este repositorio nao ter Sonar."
+            marca_sonar="**desligado sem motivo**"
+            falhou=1
+          elif [ -z "$SONAR_PROJETO" ]; then
+            motivo=$(printf '%s' "$SONAR_DISPENSA" | tr '\r\n' '  ')
+            echo "::warning::Sonar dispensado: ${motivo//%/%25}"
+            marca_sonar="dispensado: ${motivo//|/\\|}"
+          fi
           {
             echo "## Portao"
             echo ""
@@ -482,6 +524,9 @@ jobs:
               skipped)  marca="desligada" ;;
               *)        marca="**$resultado**"; falhou=1 ;;
             esac
+            if [ "$etapa" = "sonar" ] && [ -n "$marca_sonar" ]; then
+              marca="$marca_sonar"
+            fi
             echo "| $etapa | $marca |" >> "$GITHUB_STEP_SUMMARY"
           done <<< "$RESULTADOS"
           echo "" >> "$GITHUB_STEP_SUMMARY"
