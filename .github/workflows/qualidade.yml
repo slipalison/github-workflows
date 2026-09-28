@@ -266,6 +266,30 @@ jobs:
           # shellcheck disable=SC2086 # uma palavra por pacote, de proposito
           sudo apt-get install -y -q --no-install-recommends $PACOTES
 
+      - name: O python3 do runner roda o relatorio?
+        # O passo `Cobertura` roda o bin/cobertura.py, que pede Python 3.11
+        # (`typing.Self`). O python3 do ubuntu-22.04 e o 3.10, e la o passo
+        # quebrou no import (ddc-control, run 36431331755); o ubuntu-latest e
+        # o windows-latest trazem o 3.12. So com `so` escrito, porque sem ele
+        # o runner e o ubuntu-latest; e o setup-python abaixo so roda quando
+        # o do runner e velho. Componente python ja ganha o dele no `preparar`.
+        id: python_relatorio
+        if: matrix.c.so && matrix.c.linguagem != 'python'
+        run: |
+          set -euo pipefail
+          python3 --version
+          if python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'; then
+            echo "antigo=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "antigo=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Python 3.12 para o relatorio
+        if: steps.python_relatorio.outputs.antigo == 'true'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
       # ---------------------------------------------------------------- dotnet
       - name: dotnet restore
         if: matrix.c.linguagem == 'dotnet'

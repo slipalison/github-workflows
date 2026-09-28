@@ -878,7 +878,10 @@ no Ubuntu 22.04 nem no Debian 12. Por isso o componente Linux que empacota usa
 `so: ubuntu-22.04`, e a chave do cache do `target/` leva o runner: um `target/`
 do 24.04 restaurado no 22.04 desfaria isso calado. As ferramentas também
 precisam rodar lá: o `cargo-audit` vem no pacote musl, estático, porque o gnu
-da 0.22.2 pede a glibc 2.39; o `tauri-cli` 2.12.0 pede no máximo a 2.34.
+da 0.22.2 pede a glibc 2.39; o `tauri-cli` 2.12.0 pede no máximo a 2.34. E o
+`relatar-cobertura` pede Python 3.11 (`typing.Self`), mas o `python3` do 22.04
+é o 3.10: com `so` escrito, o job confere o `python3` do runner e, se for mais
+velho, instala o 3.12 com o `setup-python` antes de tudo.
 
 **No Windows**, o Git Bash não traz `zip`: o `.zip` do binário extra sai do
 7-Zip da imagem do runner, que também abre o `.zip` do `tauri-cli`.
