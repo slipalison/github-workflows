@@ -198,6 +198,7 @@ esquecido não dá erro, só deixa de ter a proteção. Aqui isso é
 | Imagem varrida **antes** de publicar | [`build-push.yml`](.github/workflows/build-push.yml) | A versão anterior publicava e só depois varria: uma imagem com CRITICAL ficava no GHCR mesmo com o job vermelho. |
 | Segredo varrido no **histórico inteiro** | [`seguranca.yml`](.github/workflows/seguranca.yml) | Um segredo removido do HEAD continua em qualquer clone. Achado ali significa **rotacionar**, não apagar a linha. |
 | `concurrency` com `cancel-in-progress` | exemplos | Impede que um run obsoleto ainda escreva no GitOps. |
+| Ferramenta que entra no pacote vem com sha256 | [`qualidade.yml`](.github/workflows/qualidade.yml) | O `tauri-cli`, o `cargo-llvm-cov` e o `cargo-audit` chegam como binário de versão fixa, com o sha256 conferido. O AppImage também: o bundler do Tauri baixaria sem hash o `AppRun` (o ponto de entrada do pacote), o `linuxdeploy` e o plugin de saída da release `continuous`, e o `appimagetool` baixaria o runtime da `continuous`. O passo `Ferramentas do AppImage` traz os quatro antes, de releases versionadas, e o job reprova se o bundler ainda baixar algo ou se o AppImage não começar com o runtime conferido ([detalhes](#empacotamento-tauri-e-versão-carimbada)). Nenhuma dessas releases é imutável no GitHub: o dono pode trocar o arquivo sob o mesmo nome, e é o sha256 que faz o job reprovar em vez de empacotar o arquivo trocado. No Windows, o WiX e o NSIS o bundler confere com o hash fixo no código dele, que no NSIS ainda é sha1. |
 | Tag e release só com `GITHUB_TOKEN`, no último job | [`lancar.yml`](.github/workflows/lancar.yml) | `contents: write` existe num job só, depois de todos os portões, e nunca em pull request. Nenhum PAT: tudo o que precisa da versão acontece no mesmo run. Assunto de commit e CHANGELOG são texto de terceiro — entram nas notas por arquivo, nunca por linha de comando. Os pacotes anexados levam um `SHA256SUMS`. A saída de rede do job é `block`, com quatro destinos medidos num ensaio: `github.com` (checkout), `api.github.com` (tag e release), `uploads.github.com` (anexos) e `results-receiver.actions.githubusercontent.com` (artefatos). O blob dos artefatos o harden-runner libera sozinho, pela lista de domínios do Actions em `api.github.com/meta`. |
 
 O CI deste repositório roda `pinar_actions.py --verificar`, que **falha** se
@@ -869,8 +870,9 @@ no primeiro passo, antes do checkout.
 
 **Os passos, depois dos testes:** `Carimbar versao`, `Build <pacote> (release)`,
 `Build binarios extra (release)`, `Conferir versao dos binarios`, `Empacotar
-binarios extra`, `Instalar tauri-cli`, `Empacotar <pacote> (Tauri)` e
-`Guardar pacotes`. Os nomes são contrato: quem chama pode consultá-los pela API.
+binarios extra`, `Instalar tauri-cli`, `Ferramentas do AppImage` (só no Linux),
+`Empacotar <pacote> (Tauri)` e `Guardar pacotes`. Os nomes são contrato: quem
+chama pode consultá-los pela API.
 
 **Um arquivo por bundler, com a versão no nome e sem espaço.** O Tauri nomeia
 os pacotes pelo `productName` (`DDC Control_0.1.0_amd64.deb`). O passo apaga o
@@ -893,8 +895,40 @@ da 0.22.2 pede a glibc 2.39; o `tauri-cli` 2.12.0 pede no máximo a 2.34. E o
 é o 3.10: com `so` escrito, o job confere o `python3` do runner e, se for mais
 velho, instala o 3.12 com o `setup-python` antes de tudo.
 
+**As ferramentas do AppImage, fixadas e conferidas.** Para montar o AppImage, o
+bundler do Tauri (o `prepare_tools` do tauri-bundler 2.10.0, que o tauri-cli
+2.12.0 usa) baixa sem conferir hash três arquivos que vão para dentro do pacote
+publicado: o `AppRun`, que é o ponto de entrada do AppImage; o `linuxdeploy`; e
+o plugin `linuxdeploy-plugin-appimage` da release `continuous`, que o dono
+troca quando quer. O `appimagetool` de dentro do plugin ainda baixa, também da
+`continuous`, o runtime type2: a cabeça ELF que roda primeiro quando alguém
+abre o AppImage. O passo `Ferramentas do AppImage` baixa os quatro antes, de
+URL fixa, e confere o sha256 de cada um:
+
+| Arquivo | De onde | sha256 |
+|---|---|---|
+| `AppRun-x86_64` | `tauri-apps/binary-releases`, release `apprun-old` | `f30140a4…` |
+| `linuxdeploy-07333c6-x86_64.AppImage` | `tauri-apps/binary-releases`, release `linuxdeploy-07333c6` | `36a2d7e2…` |
+| `linuxdeploy-plugin-appimage.AppImage` | `linuxdeploy/linuxdeploy-plugin-appimage`, release `1-alpha-20250213-1` | `992d502a…` |
+| `runtime-x86_64` | `AppImage/type2-runtime`, release `20251108` | `2fca8b44…` |
+
+Os três primeiros vão para o `$XDG_CACHE_HOME/tauri`, com o nome que o
+`prepare_tools` procura, e ele só baixa o que não existe. O passo Tauri aponta
+o `XDG_CACHE_HOME` para lá. O runtime entra pelo `LDAI_RUNTIME_FILE`, que o
+plugin repassa ao `appimagetool` como `--runtime-file`. O plugin e o runtime
+vêm das últimas releases **versionadas**, e não da `continuous`. Duas travas
+provam isso no próprio job: qualquer linha `Downloading` do bundler na saída
+reprova o passo, e o AppImage tem de começar com o runtime conferido, byte a
+byte, fora as seções que o `appimagetool` preenche (digest, update info e
+assinatura). Para subir o `tauri-cli`, confira esta lista no `prepare_tools`
+da versão nova: se um nome mudar, a primeira trava reprova. O
+`bundle.useLocalToolsDir` do `tauri.conf.json` não é suportado, porque muda o
+diretório de ferramentas, e a mesma trava o acusa.
+
 **No Windows**, o Git Bash não traz `zip`: o `.zip` do binário extra sai do
-7-Zip da imagem do runner, que também abre o `.zip` do `tauri-cli`.
+7-Zip da imagem do runner, que também abre o `.zip` do `tauri-cli`. O WiX e o
+NSIS o próprio bundler baixa com hash fixo no código (`validating hash` no
+log): sha256 no WiX, sha1 no NSIS e no `nsis_tauri_utils`.
 
 ---
 

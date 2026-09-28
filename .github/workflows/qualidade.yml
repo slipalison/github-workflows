@@ -721,6 +721,63 @@ jobs:
           fi
           cargo tauri --version
 
+      - name: Ferramentas do AppImage
+        # O bundler do AppImage (o `prepare_tools` do tauri-bundler 2.10.0, o
+        # do tauri-cli 2.12.0) baixa SEM conferir hash o que vai para dentro
+        # do AppImage publicado: o `AppRun`, o ponto de entrada do arquivo; o
+        # linuxdeploy; e o plugin `linuxdeploy-plugin-appimage` da release
+        # `continuous`, que o dono troca quando quer. O `appimagetool` de
+        # dentro do plugin ainda baixa, tambem da `continuous`, o runtime
+        # type2: a cabeca ELF que roda primeiro quando alguem abre o AppImage.
+        # Medido no ddc-control (job 108971248763): tres linhas `Downloading`
+        # do bundler e o `appimagetool` chamando github.com.
+        #
+        # Aqui os quatro vem de URL fixa, com o sha256 conferido. Os tres do
+        # bundler vao para o diretorio onde ele os procura, com o nome que ele
+        # usa, e o `prepare_tools` so baixa o que nao existe. O runtime entra
+        # pelo `LDAI_RUNTIME_FILE`, que o plugin repassa ao appimagetool como
+        # `--runtime-file`. O diretorio e o `$XDG_CACHE_HOME/tauri` do
+        # `dirs::cache_dir()` do bundler; o passo seguinte aponta o
+        # `XDG_CACHE_HOME` para ca. Fica no `RUNNER_TEMP`, fora de cache:
+        # cada job semeia do zero e confere de novo.
+        #
+        # O plugin e o runtime saem das ultimas releases VERSIONADAS, e nao da
+        # `continuous`. Os sha256 sao o `digest` que o GitHub mostra em cada
+        # arquivo, menos o do plugin, publicado antes de o GitHub calcular
+        # digest: medido baixando o arquivo (15889136 bytes). Trocar o
+        # tauri-cli pede conferir esta lista no `prepare_tools` da versao nova;
+        # o passo seguinte reprova se o bundler ainda baixar alguma coisa.
+        id: appimage
+        if: >-
+          matrix.c.linguagem == 'rust' && matrix.c.empacotar_tauri == true
+          && runner.os == 'Linux'
+        env:
+          ALVO: ${{ steps.alvo.outputs.alvo }}
+        run: |
+          set -euo pipefail
+          if [ "$ALVO" != "x86_64-unknown-linux-gnu" ]; then
+            echo "::error::AppImage: sem ferramentas conferidas para $ALVO."
+            exit 1
+          fi
+          cache="$RUNNER_TEMP/cache-appimage"
+          mkdir -p "$cache/tauri"
+          while read -r destino sha256 url; do
+            arquivo="$(mktemp -d)/${destino##*/}"
+            curl --proto '=https' --tlsv1.2 -fsSL -o "$arquivo" "$url"
+            echo "${sha256}  ${arquivo}" | sha256sum -c -
+            chmod +x "$arquivo"
+            mv "$arquivo" "$cache/$destino"
+          done <<'LISTA'
+          tauri/AppRun-x86_64 f30140a43a0a59e46db21bdefdf749b9e9f2c6946e92afabbacf98b8ae73fb4f https://github.com/tauri-apps/binary-releases/releases/download/apprun-old/AppRun-x86_64
+          tauri/linuxdeploy-07333c6-x86_64.AppImage 36a2d7e274d12e1050d0e9ecfe11d339ed54720b2bec464c286d53f8b07f5c62 https://github.com/tauri-apps/binary-releases/releases/download/linuxdeploy-07333c6/linuxdeploy-x86_64.AppImage
+          tauri/linuxdeploy-plugin-appimage.AppImage 992d502a248e14ab185448ddf6f6e7d25558cb84d4623c354c3af350c25fccb3 https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/1-alpha-20250213-1/linuxdeploy-plugin-appimage-x86_64.AppImage
+          runtime-x86_64 2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64
+          LISTA
+          {
+            echo "cache=$cache"
+            echo "runtime=$cache/runtime-x86_64"
+          } >> "$GITHUB_OUTPUT"
+
       - name: ${{ matrix.c.empacotar_tauri == true && format('Empacotar {0} (Tauri)', matrix.c.build_release) || 'Empacotar app Tauri' }}
         if: matrix.c.linguagem == 'rust' && matrix.c.empacotar_tauri == true
         # Os instaladores do SO do runner: deb, rpm e AppImage no Linux; msi e
@@ -735,21 +792,64 @@ jobs:
         # espaco quebra linha de comando de quem baixa. Nome sem a versao do
         # crate reprova, porque a versao no nome e o que diz o que e o arquivo.
         # O nome do passo so leva o pacote com o campo ligado.
+        #
+        # No Linux o bundler usa as ferramentas do passo anterior. Duas travas
+        # provam isso no proprio job: uma linha `Downloading` do bundler na
+        # saida reprova, e o AppImage tem de comecar com o runtime conferido,
+        # byte a byte, fora as secoes que o appimagetool preenche (digest,
+        # update info e assinatura). No Windows o WiX e o NSIS o bundler baixa
+        # com hash fixo no proprio codigo ("validating hash" no log).
         working-directory: .
         env:
           CAMINHO_TAURI: ${{ matrix.c.caminho_tauri }}
           PACOTE_RELEASE: ${{ matrix.c.build_release }}
           TARGET: ${{ steps.alvo.outputs.target }}
+          CACHE_APPIMAGE: ${{ steps.appimage.outputs.cache }}
+          RUNTIME_APPIMAGE: ${{ steps.appimage.outputs.runtime }}
         run: |
           set -euo pipefail
           case "$RUNNER_OS" in
-            Linux) bundles="deb rpm appimage" ;;
+            Linux)
+              bundles="deb rpm appimage"
+              if [ -z "$CACHE_APPIMAGE" ] || [ ! -f "$RUNTIME_APPIMAGE" ]; then
+                echo "::error::empacotar_tauri: as ferramentas do AppImage nao foram semeadas."
+                exit 1
+              fi
+              export XDG_CACHE_HOME="$CACHE_APPIMAGE" LDAI_RUNTIME_FILE="$RUNTIME_APPIMAGE"
+              ;;
             Windows) bundles="msi nsis" ;;
             *)
               echo "::error::empacotar_tauri: sem bundler conferido para $RUNNER_OS."
               exit 1
               ;;
           esac
+          # O runtime dentro do AppImage e o conferido: compara a cabeca do
+          # arquivo com ele, zerando nos dois as secoes que o appimagetool
+          # escreve depois.
+          conferir_runtime() {
+            local cabeca referencia secao pos inicio bytes f
+            cabeca=$(mktemp)
+            referencia=$(mktemp)
+            head -c "$(stat -c %s "$RUNTIME_APPIMAGE")" "$1" > "$cabeca"
+            cp "$RUNTIME_APPIMAGE" "$referencia"
+            for secao in .digest_md5 .upd_info .sha256_sig .sig_key; do
+              pos=$(readelf -W -S "$RUNTIME_APPIMAGE" |
+                awk -v s="$secao" '{ for (i = 1; i <= NF; i++) if ($i == s) print $(i + 3), $(i + 4) }')
+              if [ -z "$pos" ]; then
+                echo "::error::appimage: o runtime nao tem a secao $secao."
+                exit 1
+              fi
+              read -r inicio bytes <<< "$pos"
+              for f in "$cabeca" "$referencia"; do
+                dd if=/dev/zero of="$f" bs=1 seek=$((16#$inicio)) count=$((16#$bytes)) conv=notrunc status=none
+              done
+            done
+            if ! cmp -s "$cabeca" "$referencia"; then
+              echo "::error::appimage: o AppImage nao comeca com o runtime conferido."
+              exit 1
+            fi
+            echo "appimage: o runtime e o conferido ($(sha256sum "$RUNTIME_APPIMAGE" | cut -c1-12))."
+          }
           versao=$(cd "$CAMINHO_TAURI" && cargo metadata --no-deps --format-version 1 --offline |
             python3 -c 'import json, os, sys
           v = [p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == os.environ["PACOTE_RELEASE"]]
@@ -760,7 +860,13 @@ jobs:
           fi
           bundle="$TARGET/release/bundle"
           rm -rf "$bundle"
-          (cd "$CAMINHO_TAURI" && cargo tauri build --ci --bundles "${bundles// /,}" -- --locked)
+          saida="$RUNNER_TEMP/tauri-build.log"
+          (cd "$CAMINHO_TAURI" && cargo tauri build --ci --bundles "${bundles// /,}" -- --locked) 2>&1 |
+            tee "$saida"
+          if [ "$RUNNER_OS" = "Linux" ] && grep -E 'Downloading https?://' "$saida"; then
+            echo "::error::empacotar_tauri: o bundler baixou ferramenta sem hash (acima); falta semea-la em 'Ferramentas do AppImage'."
+            exit 1
+          fi
           mkdir -p dist
           re_nome="^(.+)([_-]${versao//./\\.}[_-].*)$"
           for bundler in $bundles; do
@@ -789,6 +895,7 @@ jobs:
             fi
             mv "${achados[0]}" "dist/$publicado"
             echo "$bundler: $nome -> dist/$publicado"
+            if [ "$bundler" = "appimage" ]; then conferir_runtime "dist/$publicado"; fi
           done
           rm -rf "$bundle"
 
