@@ -23,7 +23,8 @@ jobs:
 
 Exemplos completos e comentados em [`exemplos/`](exemplos/): Python simples,
 repositório poliglota .NET + dois frontends, monorepo Rust + React numa imagem
-só, e repositório privado.
+só, repositório privado, e app desktop Rust/Tauri testado em Linux e Windows
+([`ci-rust-desktop.yml`](exemplos/ci-rust-desktop.yml)).
 
 ---
 
@@ -697,6 +698,13 @@ componentes: |
 | `projeto` | dotnet: `.sln`/`.csproj` · node: workspace · go: `./...` · rust: pacote do workspace (`--package`), vazio = `--workspace` |
 | `cobertura` | piso em %; `0` (padrão) desliga |
 | `scripts_de_instalacao` | node: `true` deixa o `npm ci` rodar `postinstall` e afins. O padrão é `--ignore-scripts`: script de instalação roda antes de qualquer teste, e é o vetor clássico de pacote comprometido. Ligue só para pacote nativo que precise compilar. |
+| `so` | runner do componente: `ubuntu-*` (padrão `ubuntu-latest`) ou `windows-*`, este só com `linguagem: rust`, a única medida no Windows. Fora disso, reprova no primeiro passo, `Conferir componente`. |
+| `pacotes_sistema` | pacotes apt separados por espaço, instalados antes do build. Só em runner Linux; a lista passa por regex e chega ao `apt-get` por `env`. |
+| `auditoria` | rust: `true` roda `cargo audit`. Só em runner Linux. |
+| `build_release` | rust: um pacote do workspace; o passo `Build <pacote> (release)` roda `cargo build -p <pacote> --release --locked`. |
+
+Os quatro últimos são opcionais. Sem eles o componente roda os mesmos passos e
+comandos de antes, no `ubuntu-latest`.
 
 `fail-fast: false` de propósito: o padrão mata os outros componentes quando um
 falha e mostra só o primeiro erro — com três componentes, isso vira três rodadas
@@ -731,6 +739,57 @@ o caminho é conhecido.
 No Sonar, as propriedades são `sonar.rust.lcov.reportPaths` (ou
 `sonar.rust.cobertura.reportPaths`) e `sonar.rust.cargo.manifestPaths`. O
 analisador roda o Clippy sozinho — `sonar.rust.clippy.enabled` vem ligado.
+
+#### Windows, pacotes do sistema, auditoria e build de release
+
+Entrou em 2026-09-27, com o `ddc-control` — um app de bandeja em Tauri 2 que
+precisa compilar e passar nos testes em Linux **e** Windows. O exemplo
+[`ci-rust-desktop.yml`](exemplos/ci-rust-desktop.yml) é essa forma.
+
+**`so: windows-latest`.** O componente roda no Windows com os mesmos passos. Os
+`run:` do `qualidade.yml` usam `bash` também lá (o Git Bash da imagem), e não o
+`pwsh` padrão: os scripts são os mesmos nos dois SOs. O `cargo-llvm-cov` vem no
+pacote do SO do runner. O `relatar-cobertura` roda sem mudança: o Python do
+`windows-latest` já responde como `python3` no Git Bash (medido em 2026-09-27, o
+3.12.10 do tool cache). O piso de cobertura costuma ficar no componente Linux
+(`cobertura: 0` no Windows): o painel relata, e o número que vale não depende de
+código `cfg(windows)`. Com `so` fora de `ubuntu-*`/`windows-*` o job roda no
+`ubuntu-latest` e reprova no primeiro passo. Passado direto, um rótulo que
+nenhum runner tem deixaria o job esperando na fila, sem dizer por quê.
+
+**Windows só com `rust`.** É a única linguagem medida lá, com o `shell: bash` e
+o `preparar`. dotnet, python, node e go nunca rodaram nessa combinação, e o
+`go test -race` ainda pede cgo com um gcc que a imagem não traz. Um componente
+`windows-*` de outra linguagem reprova no `Conferir componente`, dizendo isso,
+em vez de quebrar no meio do build. Para liberar outra linguagem, é preciso um
+run real que a prove, no mesmo PR que a libera.
+
+**`pacotes_sistema`.** O que o crate linka e a imagem do runner não traz: no
+Tauri, o WebKitGTK (`libwebkit2gtk-4.1-dev`). A lista é validada por regex no
+primeiro passo e entra no `apt-get install` por `env`, nunca interpolada no
+script. Só vale em Linux: pedir apt num runner Windows reprova, em vez de ser
+ignorado calado.
+
+**`auditoria: true`.** Um passo `cargo audit` no `Cargo.lock` do componente,
+antes do clippy: leva segundos, e dependência vulnerável é motivo para parar
+antes da compilação longa. As exceções moram no `.cargo/audit.toml` do
+repositório que as assume, cada uma com o motivo, e não aqui. Não há
+`--ignore`, `|| true` nem `severity_threshold`: vulnerabilidade que o chamador
+não ignorou reprova. Só em Linux: o `Cargo.lock` é o mesmo em qualquer SO, e
+auditá-lo duas vezes não prova nada novo.
+
+**`build_release`.** O `cargo llvm-cov` compila instrumentado, em perfil de
+teste. Só um `cargo build --release --locked` prova que o binário de produção
+compila — no Tauri, com `custom-protocol` e os recursos do Windows. O passo
+vem depois dos testes e se chama `Build <pacote> (release)`.
+
+**Binário pronto, versão fixa, hash conferido.** O `cargo-llvm-cov` (0.9.1) e
+o `cargo-audit` (0.22.2) chegam como binário publicado na release de cada
+projeto, e não por `cargo install`, que levaria minutos compilando a ferramenta
+na versão que o crates.io tiver hoje. A versão fixa diz o que baixar. O sha256,
+tirado do `digest` que o GitHub mostra em cada arquivo da release, prova que
+chegou isso. Arquivo que não bate não é extraído. Para subir uma delas, troque
+a versão e o hash juntos, num PR.
 
 ---
 
