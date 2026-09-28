@@ -198,7 +198,7 @@ esquecido não dá erro, só deixa de ter a proteção. Aqui isso é
 | Imagem varrida **antes** de publicar | [`build-push.yml`](.github/workflows/build-push.yml) | A versão anterior publicava e só depois varria: uma imagem com CRITICAL ficava no GHCR mesmo com o job vermelho. |
 | Segredo varrido no **histórico inteiro** | [`seguranca.yml`](.github/workflows/seguranca.yml) | Um segredo removido do HEAD continua em qualquer clone. Achado ali significa **rotacionar**, não apagar a linha. |
 | `concurrency` com `cancel-in-progress` | exemplos | Impede que um run obsoleto ainda escreva no GitOps. |
-| Tag e release só com `GITHUB_TOKEN`, no último job | [`lancar.yml`](.github/workflows/lancar.yml) | `contents: write` existe num job só, depois de todos os portões, e nunca em pull request. Nenhum PAT: tudo o que precisa da versão acontece no mesmo run. Assunto de commit e CHANGELOG são texto de terceiro — entram nas notas por arquivo, nunca por linha de comando. Os pacotes anexados levam um `SHA256SUMS`. |
+| Tag e release só com `GITHUB_TOKEN`, no último job | [`lancar.yml`](.github/workflows/lancar.yml) | `contents: write` existe num job só, depois de todos os portões, e nunca em pull request. Nenhum PAT: tudo o que precisa da versão acontece no mesmo run. Assunto de commit e CHANGELOG são texto de terceiro — entram nas notas por arquivo, nunca por linha de comando. Os pacotes anexados levam um `SHA256SUMS`. A saída de rede do job é `block`, com quatro destinos medidos num ensaio: `github.com` (checkout), `api.github.com` (tag e release), `uploads.github.com` (anexos) e `results-receiver.actions.githubusercontent.com` (artefatos). O blob dos artefatos o harden-runner libera sozinho, pela lista de domínios do Actions em `api.github.com/meta`. |
 
 O CI deste repositório roda `pinar_actions.py --verificar`, que **falha** se
 algum `uses:` escapar por tag ou divergir do lock.
@@ -577,6 +577,10 @@ O que o job faz com eles, em ordem:
 5. **Cria a release com os anexos**: o `gh release create` com arquivos cria um
    rascunho, sobe todos e só então publica. Uma release publicada nunca fica
    sem pacote.
+
+O job roda com a saída de rede em `block` (ver [Segurança](#segurança)): no
+ensaio que mediu a lista, os sete pacotes do `ddc-control` (~100 MB) foram
+baixados, somados e anexados em 20 s.
 
 **O ensaio.** Um rascunho não cria a tag nem aparece para quem não tem escrita
 no repositório. É como o repositório da aplicação prova o job inteiro sem

@@ -180,9 +180,9 @@ jobs:
     # liberado, falho nao.
     if: always() && (needs.alias.result == 'success' || needs.alias.result == 'skipped')
     runs-on: ubuntu-latest
-    # PROVISORIO: 15 ate o ensaio medir o tempo com os pacotes do ddc-control
-    # (~250 MB, baixados e subidos de novo).
-    timeout-minutes: 15
+    # Medido no ensaio do ddc-control (run 36432836623): 20 s com os sete
+    # pacotes (~100 MB) baixados, somados e subidos de novo.
+    timeout-minutes: 5
     permissions:
       contents: write
     steps:
@@ -190,15 +190,28 @@ jobs:
         uses: slipalison/github-workflows/.github/actions/preparar@main
         with:
           historico-completo: "true"
-          # PROVISORIO: `audit` so ate o ensaio com pacotes medir os destinos
-          # do download dos artefatos e do upload dos anexos; a lista medida
-          # volta este job para `block` (fase release-packaging do
-          # ddc-control, T-6). Este job segura um token com escrita no
-          # repositorio.
-          egresso: audit
+          # Este job segura um token com escrita no repositorio. Como no
+          # deploy, a saida de rede e uma lista fechada, e cada destino foi
+          # MEDIDO: ensaio do ddc-control em `audit` (run 36432836623), no log
+          # do pos-passo do harden-runner (`endpoint called ...`). Os
+          # comentarios ficam aqui fora; dentro do bloco `|` virariam destino.
+          #   github.com          o checkout do `Preparar`, historico inteiro
+          #   api.github.com      o gh: a tag existe?, o rascunho velho, a
+          #                       release e o id dela
+          #   uploads.github.com  o `gh release create` subindo os anexos
+          #   results-receiver.actions.githubusercontent.com
+          #                       `Baixar pacotes`: o servico de artefatos
+          # O blob dos artefatos (productionresultssa0..19.blob.core.windows.net,
+          # medido o sa3) nao entra: o harden-runner o libera sozinho em
+          # `block`, porque vem da lista de dominios do Actions em
+          # api.github.com/meta, que o agente busca e mostra no mesmo log
+          # (`fetched GitHub meta domains`).
+          egresso: block
           destinos-liberados: |
             github.com:443
             api.github.com:443
+            uploads.github.com:443
+            results-receiver.actions.githubusercontent.com:443
 
       - name: Conferir as entradas
         # Sem arquivo, sem rede e sem outra variavel: so os quatro valores que
