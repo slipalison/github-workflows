@@ -876,7 +876,9 @@ uma tabela só, no passo `Alvo do runner`, que o `cargo-llvm-cov` também lê.
 foram construídos: feitos no `ubuntu-latest` (24.04, glibc 2.39), não rodariam
 no Ubuntu 22.04 nem no Debian 12. Por isso o componente Linux que empacota usa
 `so: ubuntu-22.04`, e a chave do cache do `target/` leva o runner: um `target/`
-do 24.04 restaurado no 22.04 desfaria isso calado.
+do 24.04 restaurado no 22.04 desfaria isso calado. As ferramentas também
+precisam rodar lá: o `cargo-audit` vem no pacote musl, estático, porque o gnu
+da 0.22.2 pede a glibc 2.39; o `tauri-cli` 2.12.0 pede no máximo a 2.34.
 
 **No Windows**, o Git Bash não traz `zip`: o `.zip` do binário extra sai do
 7-Zip da imagem do runner, que também abre o `.zip` do `tauri-cli`.

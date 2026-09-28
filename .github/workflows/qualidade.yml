@@ -432,16 +432,21 @@ jobs:
         # cargo-llvm-cov, logo abaixo. `cargo install cargo-audit` compilaria a
         # ferramenta por minutos, e na versao que o crates.io tiver hoje. O
         # sha256 e o `digest` da release cargo-audit/v0.22.2 no GitHub.
+        #
+        # O pacote musl, e nao o gnu: o gnu da v0.22.2 pede GLIBC_2.39 e nao
+        # roda no ubuntu-22.04 (ddc-control, run 36429141171). O musl e
+        # estatico, roda em qualquer Linux, e le o mesmo Cargo.lock e o mesmo
+        # `.cargo/audit.toml` (mesma saida no ddc-control local).
         env:
           VERSAO_AUDIT: "0.22.2"
-          SHA256_AUDIT: "ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39"
+          SHA256_AUDIT: "7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428"
         run: |
           set -euo pipefail
           if [ "$RUNNER_ARCH" != "X64" ]; then
             echo "::error::cargo-audit: so ha binario conferido para Linux X64 (este e $RUNNER_ARCH)."
             exit 1
           fi
-          nome="cargo-audit-x86_64-unknown-linux-gnu-v${VERSAO_AUDIT}"
+          nome="cargo-audit-x86_64-unknown-linux-musl-v${VERSAO_AUDIT}"
           tmp=$(mktemp -d)
           curl --proto '=https' --tlsv1.2 -fsSL -o "$tmp/$nome.tgz" \
             "https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv${VERSAO_AUDIT}/${nome}.tgz"
