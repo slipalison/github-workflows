@@ -26,6 +26,29 @@ repositório poliglota .NET + dois frontends, monorepo Rust + React numa imagem
 só, repositório privado, e app desktop Rust/Tauri testado em Linux e Windows
 ([`ci-rust-desktop.yml`](exemplos/ci-rust-desktop.yml)).
 
+## O mínimo exigido
+
+Todo repositório de aplicação entra pelo `pipeline.yml`, seja serviço, pacote
+ou app desktop. Chamar as peças avulsas também funciona, e é esse o problema:
+`versao` + `qualidade` + `lancar` publicam uma release sem varredura de
+segurança, sem Sonar e sem portão, e nada no painel diz que faltou alguma
+coisa. O `ddc-control` publicou a v0.1.0 assim, e só deixou de publicar em
+2026-09-28.
+
+| Etapa | Exigida | O que o `Portao` faz |
+|---|---|---|
+| `qualidade`: lint, testes e cobertura | sempre | reprova se falhar. O piso é o `cobertura` de cada componente, e `0` desliga o piso daquele componente |
+| `seguranca`: Gitleaks, TruffleHog, Semgrep, Trivy (SCA) e SBOM | sempre | reprova se falhar. Só sai pulada num push na branch de produção com `seguranca_na_main: false` |
+| `sonar`: análise e Quality Gate | sempre, ou dispensa escrita | reprova se falhar, e **reprova também sem `sonar_projeto` e sem `sonar_dispensa`**. A dispensa aparece no painel e num `::warning::` em todo run |
+| `versao`: Conventional Commits | sempre, salvo `versionar: false` | reprova commit fora do padrão |
+| CodeQL | em repositório público | não confere: `linguagens_codeql` vazio desliga, porque em privado sem GHAS ele não tem onde publicar ([Sonar para todo mundo](#sonar-para-todo-mundo-público-e-privado)) |
+| `imagem` e `publicar` | só em serviço | pulados com `imagem` e `app` vazios |
+
+O `Portao` é um check só, e é ele que vai no ruleset da branch de produção,
+como status check obrigatório. O nome é o do job que chama mais `/ Portao`:
+`esteira / Portao` nos exemplos. Sem esse check no ruleset, um PR com a
+esteira vermelha continua mergeável.
+
 ---
 
 ## O desenho
@@ -552,11 +575,21 @@ Quem chama precisa conceder `contents: write` (tag e release) e `packages: write
 
 ### Pacotes na release
 
-Quem não publica imagem, e sim instalador (um app desktop), chama o
-[`lancar.yml`](.github/workflows/lancar.yml) direto, com três inputs a mais,
-todos opcionais. Sem eles, os passos e os comandos são os de antes.
+Quem publica instalador, e não imagem (um app desktop), usa o mesmo
+`pipeline.yml`, com dois inputs a mais. Os dois são opcionais, e sem eles nada
+muda:
 
-| Input | Padrão | |
+| Input do `pipeline.yml` | Vira, no `lancar.yml` | |
+|---|---|---|
+| `artefatos_release` | `artefatos` | os pacotes deste run que vão anexados |
+| `changelog` | `changelog` | a seção do CHANGELOG que abre as notas |
+
+O [`lancar.yml`](.github/workflows/lancar.yml) chamado direto recebe esses
+dois e mais o `rascunho`. Isso vale para um repositório que não é aplicação: chamado assim,
+ele não passa pela segurança, pelo Sonar nem pelo portão
+([O mínimo exigido](#o-mínimo-exigido)).
+
+| Input do `lancar.yml` | Padrão | |
 |---|---|---|
 | `artefatos` | `""` | padrão de nome dos artefatos **deste run** a anexar, os do [empacotamento Tauri](#empacotamento-tauri-e-versão-carimbada). Use o mais estreito que case só os componentes que empacotam (`pacotes-app-*`, e não `pacotes-*`): um padrão largo anexaria o artefato de qualquer outro job do run, inclusive de um que rode código de terceiro, como um `npm ci`. |
 | `changelog` | `""` | caminho de um CHANGELOG no formato Keep a Changelog. A seção `## [<versão>]`, ou a `## [Unreleased]` se ela não existir, abre as notas; as notas dos commits vêm depois. |
@@ -590,11 +623,18 @@ ensaio que mediu a lista, os sete pacotes do `ddc-control` (~100 MB) foram
 baixados, somados e anexados em 20 s.
 
 **O ensaio.** Um rascunho não cria a tag nem aparece para quem não tem escrita
-no repositório. É como o repositório da aplicação prova o job inteiro sem
-publicar nada: o [`ci-rust-desktop.yml`](exemplos/ci-rust-desktop.yml) dispara
-também num push em `ensaio-release/**`, e ali passa `rascunho: true`. O
-rascunho fica para alguém baixar e instalar os pacotes; o primeiro push de
-verdade na `main` o apaga e publica a release no lugar.
+no repositório. Foi assim que o `ddc-control` provou o job inteiro antes da
+v0.1.0, chamando o `lancar.yml` direto numa branch `ensaio-release/*`. O
+primeiro push de verdade na `main` apaga o rascunho e publica a release no
+lugar.
+
+**Pelo `pipeline.yml` não há ensaio.** O rascunho teria de passar pelos
+portões, e o SonarQube Cloud Free só analisa a branch principal e os pull
+requests. Medido no `ddc-control` (run 36498449337): o relatório da branch de
+ensaio sobe, e a consulta do Quality Gate volta *"Not authorized or project not
+found"*. Pular o Sonar no ensaio seria abrir a porta que o pipeline fecha. Os
+pacotes de todo pull request ficam como artefato do run, para baixar e
+instalar.
 
 **Não ensaie perto do merge.** Com anexos, o `gh release create` da `main`
 também passa por um rascunho enquanto sobe os arquivos. Um ensaio da mesma
@@ -806,7 +846,13 @@ o caminho é conhecido.
 
 No Sonar, as propriedades são `sonar.rust.lcov.reportPaths` (ou
 `sonar.rust.cobertura.reportPaths`) e `sonar.rust.cargo.manifestPaths`. O
-analisador roda o Clippy sozinho — `sonar.rust.clippy.enabled` vem ligado.
+analisador de Rust do SonarQube Cloud não compila e não roda o Clippy: medido
+no `ddc-control` (2026-09-28), o sensor `Rust Enterprise` analisou o workspace
+em 4,6 s com o perfil *Sonar way comprehensive*, sem uma linha de Clippy no log.
+O Clippy com `-D warnings` é portão do job de qualidade. O que compila no job do
+Sonar é o `comando_testes`, que mede a cobertura: por isso ele pede o toolchain
+(`sonar_versao_linguagem`) e, num app Tauri, as bibliotecas de sistema
+(`sonar_pacotes_sistema`).
 
 #### Windows, pacotes do sistema, auditoria e build de release
 
@@ -955,7 +1001,13 @@ log): sha256 no WiX, sha1 no NSIS e no `nsis_tauri_utils`.
    write` para o SARIF. Sem isso o run morre em `startup_failure` com
    *"requesting 'packages: write', but is only allowed 'packages: read'"*, que
    **não aparece no log de passo nenhum**.
-4. **`SONAR_TOKEN`** no repositório, para a análise.
+4. **`SONAR_TOKEN`** no repositório, para a análise, e no SonarQube Cloud a
+   **Análise Automática desligada** no projeto (Administration → Analysis
+   Method). Com ela ligada, o scanner do CI reprova com *"You are running CI
+   analysis while Automatic Analysis is enabled"*. E ela não substitui o CI:
+   não recebe cobertura, e no `ddc-control` não analisou uma linha de Rust.
 5. **Imagem acessível ao cluster.** Pacote privado no GHCR sem `imagePullSecret`
    deixa o pod em `ImagePullBackOff` dizendo que não encontrou a imagem — o que
    não parece um problema de credencial.
+6. **O `Portao` como status check obrigatório** no ruleset da branch de
+   produção ([O mínimo exigido](#o-mínimo-exigido)).

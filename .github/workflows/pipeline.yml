@@ -51,6 +51,33 @@ name: Pipeline
 # Commit fora do padrao REPROVA `versao`, e com ele o portao e a publicacao. E o
 # padrao, de proposito: um commit sem tipo virando patch em silencio seria uma
 # quebra de contrato publicada como correcao. `commits_sem_tipo` afrouxa.
+#
+# O QUE NAO SE DESLIGA EM SILENCIO
+# --------------------------------
+# `qualidade` e `seguranca` rodam sempre. O Sonar roda quando ha
+# `sonar_projeto`; sem ele, o repositorio escreve o motivo em `sonar_dispensa`,
+# e sem nenhum dos dois o `portao` REPROVA. Antes de 2026-09-28 um
+# `sonar_projeto` vazio pulava o Sonar e o portao marcava "desligada", com a
+# mesma cara de uma decisao consciente. Um controle que some por esquecimento
+# e a falha que o `sonar.yml` ja recusa no token; aqui ela e recusada um nivel
+# acima.
+#
+# APP DESKTOP TAMBEM ENTRA POR AQUI
+# ---------------------------------
+# Sem `imagem` e sem `app`, os jobs `imagem` e `publicar` saem pulados e o resto
+# e a esteira inteira. O que um instalador precisa a mais passa por inputs:
+# `timeout_qualidade` (o Tauri sem cache estoura os 20 minutos padrao),
+# `artefatos_release` e `changelog` (os pacotes e as notas da release). O
+# `ddc-control` chamou `versao`, `qualidade` e `lancar` avulsos ate 2026-09-28
+# e publicou a v0.1.0 sem varredura de seguranca, sem Sonar e sem portao —
+# nada no painel dizia que faltavam. E o exemplo `ci-rust-desktop.yml`.
+#
+# Sem ensaio de release por aqui: o rascunho numa branch de ensaio teria de
+# passar pelo Sonar, e o SonarQube Cloud Free so analisa a branch principal e
+# os pull requests. Medido no ddc-control (run 36498449337): o relatorio da
+# branch sobe, e a consulta do Quality Gate volta "Not authorized or project
+# not found". Pular o Sonar no ensaio abriria exatamente a porta que este
+# arquivo fecha. Os pacotes de todo PR ficam como artefato do run.
 
 on:
   workflow_call:
@@ -78,6 +105,23 @@ on:
         required: false
         type: boolean
         default: false
+      artefatos_release:
+        description: >-
+          Padrao de nome dos artefatos DESTE run anexados a release, como os
+          `pacotes-<componente>` do empacotamento Tauri. Vazio: release sem
+          anexos. E o `artefatos` do lancar.yml; use o padrao mais estreito que
+          case so os componentes que empacotam.
+        required: false
+        type: string
+        default: ""
+      changelog:
+        description: >-
+          CHANGELOG no formato Keep a Changelog, relativo a raiz. A secao da
+          versao (ou a `[Unreleased]`) abre as notas da release. Vazio: so as
+          notas dos commits.
+        required: false
+        type: string
+        default: ""
 
       # ----------------------------------------------------------- qualidade --
       componentes:
@@ -87,6 +131,14 @@ on:
         required: false
         type: string
         default: '[{"nome":"app","linguagem":"python"}]'
+      timeout_qualidade:
+        description: >-
+          Minutos de cada job de qualidade. Os 20 do padrao nao bastam para um
+          app Tauri sem cache no Windows (13 min no primeiro run do
+          ddc-control).
+        required: false
+        type: number
+        default: 20
 
       # -------------------------------------------------------------- imagem --
       imagem:
@@ -113,7 +165,17 @@ on:
 
       # --------------------------------------------------------------- sonar --
       sonar_projeto:
-        description: "sonar.projectKey. Vazio pula o Sonar."
+        description: >-
+          sonar.projectKey. Vazio pula o Sonar, e entao `sonar_dispensa` e
+          obrigatorio: sem nenhum dos dois o portao reprova.
+        required: false
+        type: string
+        default: ""
+      sonar_dispensa:
+        description: >-
+          O MOTIVO de o repositorio nao passar pelo Sonar, em uma linha. So com
+          `sonar_projeto` vazio; os dois juntos reprovam. Aparece no painel do
+          portao e num `::warning::` em todo run.
         required: false
         type: string
         default: ""
@@ -133,6 +195,14 @@ on:
         required: false
         type: string
         default: "nenhuma"
+      sonar_versao_linguagem:
+        description: >-
+          Versao da linguagem no job do Sonar, como o `versao` de um
+          componente. Em Rust e o toolchain do `comando_testes`, que compila
+          e mede a cobertura.
+        required: false
+        type: string
+        default: ""
       sonar_projeto_dotnet:
         required: false
         type: string
@@ -142,6 +212,11 @@ on:
         type: string
         default: ""
       sonar_parametros:
+        required: false
+        type: string
+        default: ""
+      sonar_pacotes_sistema:
+        description: "Pacotes apt do job do Sonar. Ver `pacotes_sistema` no sonar.yml."
         required: false
         type: string
         default: ""
@@ -240,9 +315,21 @@ jobs:
       versao_inicial: ${{ inputs.versao_inicial }}
 
   qualidade:
+    # Espera o `versao` por um motivo so: o componente com `carimbar_versao`
+    # escreve no pacote a versao que ele calculou. Custa o relogio do `versao`,
+    # 16 s entre o inicio dele e o da qualidade no ddc-control (run
+    # 36453793875); os outros jobs nao esperam, e o Sonar costuma ser o mais
+    # lento. `!cancelled()`: com o `versao` reprovado (commit fora do padrao)
+    # ou pulado (`versionar: false`), os testes rodam assim mesmo, e o mesmo
+    # run mostra os dois problemas. So o componente que carimba reprova sem
+    # versao, no primeiro passo, dizendo por que.
+    needs: [versao]
+    if: ${{ !cancelled() }}
     uses: slipalison/github-workflows/.github/workflows/qualidade.yml@main
     with:
       componentes: ${{ inputs.componentes }}
+      timeout: ${{ inputs.timeout_qualidade }}
+      versao: ${{ needs.versao.outputs.versao }}
     secrets:
       GH_PACKAGES_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
 
@@ -274,9 +361,11 @@ jobs:
       host: ${{ inputs.sonar_host }}
       modo: ${{ inputs.sonar_modo }}
       linguagem: ${{ inputs.sonar_linguagem }}
+      versao_linguagem: ${{ inputs.sonar_versao_linguagem }}
       projeto_dotnet: ${{ inputs.sonar_projeto_dotnet }}
       comando_testes: ${{ inputs.sonar_comando_testes }}
       parametros: ${{ inputs.sonar_parametros }}
+      pacotes_sistema: ${{ inputs.sonar_pacotes_sistema }}
       exigir_token: ${{ inputs.sonar_exigir_token }}
     secrets:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
@@ -362,6 +451,8 @@ jobs:
       tag_movel_major: ${{ inputs.tag_movel_major }}
       commits_sem_tipo: ${{ inputs.commits_sem_tipo }}
       versao_inicial: ${{ inputs.versao_inicial }}
+      artefatos: ${{ inputs.artefatos_release }}
+      changelog: ${{ inputs.changelog }}
 
   # Um unico check para marcar como obrigatorio na protecao de branch. Sem isto
   # a lista de checks obrigatorios precisa nomear cada job, e um job novo entra
@@ -381,9 +472,31 @@ jobs:
             imagem=${{ needs.imagem.result }}
             sonar=${{ needs.sonar.result }}
             seguranca=${{ needs.seguranca.result }}
+          # Por `env`: o motivo e texto de quem chama.
+          SONAR_PROJETO: ${{ inputs.sonar_projeto }}
+          SONAR_DISPENSA: ${{ inputs.sonar_dispensa }}
         run: |
           set -euo pipefail
           falhou=0
+          # O Sonar so sai `skipped` sem `sonar_projeto`, e ai precisa de um
+          # motivo escrito (ver "O QUE NAO SE DESLIGA EM SILENCIO" no
+          # cabecalho). O motivo vira uma linha: numa anotacao, uma quebra de
+          # linha abriria outro comando do runner, e `%` se escreve `%25`; na
+          # tabela, `|` abriria outra coluna.
+          marca_sonar=""
+          if [ -n "$SONAR_PROJETO" ] && [ -n "$SONAR_DISPENSA" ]; then
+            echo "::error::sonar_projeto e sonar_dispensa juntos: ou o Sonar roda, ou o motivo de nao rodar fica escrito. Os dois nao dizem qual vale."
+            marca_sonar="**ligado e dispensado ao mesmo tempo**"
+            falhou=1
+          elif [ -z "$SONAR_PROJETO" ] && [ -z "$SONAR_DISPENSA" ]; then
+            echo "::error::Sonar desligado sem motivo. Passe sonar_projeto (com o secret SONAR_TOKEN), ou sonar_dispensa com o motivo de este repositorio nao ter Sonar."
+            marca_sonar="**desligado sem motivo**"
+            falhou=1
+          elif [ -z "$SONAR_PROJETO" ]; then
+            motivo=$(printf '%s' "$SONAR_DISPENSA" | tr '\r\n' '  ')
+            echo "::warning::Sonar dispensado: ${motivo//%/%25}"
+            marca_sonar="dispensado: ${motivo//|/\\|}"
+          fi
           {
             echo "## Portao"
             echo ""
@@ -397,6 +510,9 @@ jobs:
               skipped)  marca="desligada" ;;
               *)        marca="**$resultado**"; falhou=1 ;;
             esac
+            if [ "$etapa" = "sonar" ] && [ -n "$marca_sonar" ]; then
+              marca="$marca_sonar"
+            fi
             echo "| $etapa | $marca |" >> "$GITHUB_STEP_SUMMARY"
           done <<< "$RESULTADOS"
           echo "" >> "$GITHUB_STEP_SUMMARY"
