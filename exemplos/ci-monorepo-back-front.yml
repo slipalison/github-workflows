@@ -122,9 +122,10 @@ jobs:
       #   sonar.rust.lcov.reportPaths       — cobertura do Rust
       #   sonar.javascript.lcov.reportPaths — cobertura do front
       #
-      # O analisador de Rust do Sonar roda o Clippy sozinho
-      # (`sonar.rust.clippy.enabled`, ligado por padrao) e precisa saber onde
-      # estao os Cargo.toml (`sonar.rust.cargo.manifestPaths`).
+      # O analisador de Rust do Sonar precisa saber onde estao os Cargo.toml
+      # (`sonar.rust.cargo.manifestPaths`). Ele analisa com as regras dele, sem
+      # compilar e sem o Clippy (medido no ddc-control, ver o README, Rust); o
+      # Clippy com `-D warnings` e portao do job de qualidade.
       #
       # CUSTO ACEITO, e vale saber: o job `sonar` roda os testes DE NOVO —
       # `qualidade` e `sonar` correm em paralelo de proposito, e um job nao le o

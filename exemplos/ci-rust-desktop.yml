@@ -2,29 +2,52 @@
 # webview testada em Node. Copiar para .github/workflows/ci.yml no
 # repositorio da aplicacao e trocar os nomes. E a forma do `ddc-control`.
 #
-# SEM IMAGEM, SEM DEPLOY
-# ----------------------
-# Um app desktop nao vira container nem vai para o GitOps: `pipeline.yml`
-# traria build de imagem, Trivy e deploy para nada. Aqui o caller chama direto
-# os dois workflows que servem — `versao` (so calcula, nao cria tag) e
-# `qualidade` —, e sobra lugar para pendurar o empacotamento (MSI, deb,
-# AppImage) e a release depois deles, so na main.
+# A MESMA ESTEIRA DE UM SERVICO
+# -----------------------------
+# Um app desktop nao vira container nem vai para o GitOps, e isso NAO e motivo
+# para chamar as pecas avulsas: com `imagem` e `app` vazios, o `pipeline.yml`
+# pula o build de imagem e o deploy, e o resto e a esteira inteira. Qualidade,
+# as varreduras de seguranca, o Sonar e o portao. Ate 2026-09-28 este exemplo
+# chamava `versao`, `qualidade` e `lancar` direto, e quem o copiou publicou
+# release sem varredura de seguranca e sem Sonar. Ver "O minimo exigido" no
+# README.
 #
 # O QUE CADA COMPONENTE PROVA
 # ---------------------------
-#   app-linux    fmt, `cargo audit`, clippy, testes com piso de cobertura e o
-#                binario de release. `pacotes_sistema` traz o que o webview do
-#                Tauri linka no Linux (WebKitGTK) e o libudev de quem fala com
-#                hardware; nada disso vem na imagem do runner. A auditoria le as
-#                excecoes do `.cargo/audit.toml` do repositorio, cada uma com o
-#                motivo escrito ao lado.
+#   app-linux    fmt, `cargo audit`, clippy, testes com piso de cobertura, o
+#                binario de release e os pacotes deb, rpm e AppImage, mais o
+#                `.tar.gz` do CLI. `pacotes_sistema` traz o que o webview do
+#                Tauri linka no Linux (WebKitGTK), o libudev de quem fala com
+#                hardware e o librsvg que o plugin gtk do AppImage procura pelo
+#                pkg-config; nada disso vem na imagem do runner. A auditoria le
+#                as excecoes do `.cargo/audit.toml` do repositorio, cada uma
+#                com o motivo escrito ao lado.
+#                `so: ubuntu-22.04`, e nao o latest: o pacote liga na glibc de
+#                onde foi construido, e o do 24.04 (glibc 2.39) nao roda no
+#                Ubuntu 22.04 nem no Debian 12.
 #   app-windows  os mesmos passos no windows-latest, menos a auditoria (o
-#                Cargo.lock e o mesmo: auditar de novo nao prova nada novo).
+#                Cargo.lock e o mesmo: auditar de novo nao prova nada novo),
+#                com o msi, o instalador NSIS e o `.zip` do CLI.
 #                Cobertura 0: o painel relata, e o piso e medido no Linux, onde
 #                o numero nao depende de codigo `cfg(windows)`.
 #   ui           `npm ci --ignore-scripts` e `npm test` no diretorio do front,
-#                no ubuntu-latest: o `qualidade` so aceita windows-* com
-#                `linguagem: rust`, a unica medida no Windows.
+#                com piso de cobertura: o `npm test` escreve o
+#                `coverage/lcov.info` que o painel le. No ubuntu-latest: o
+#                `qualidade` so aceita windows-* com `linguagem: rust`, a unica
+#                medida no Windows.
+#
+# A RELEASE, SO DEPOIS DO PORTAO. Na main, com qualidade, seguranca e Sonar
+# verdes, o `lancar` cria a tag e a release com os pacotes dos dois SOs
+# anexados, o `SHA256SUMS` e a secao do CHANGELOG. Em pull request ele nunca
+# roda, e os pacotes de todo PR ficam como artefato do run
+# (`pacotes-app-linux`, `pacotes-app-windows`), para baixar e instalar antes do
+# merge. Sem ensaio de release em branch: o SonarQube Cloud Free nao analisa
+# branch que nao seja a principal, e o rascunho nao passaria pelo Sonar (ver o
+# README, "Pacotes na release").
+#
+# A VERSAO E CARIMBADA. O Cargo.toml do repositorio diz `0.0.0`, e o
+# `qualidade` escreve nele a versao que o `versao` calculou, antes do build de
+# release: os pacotes do PR ja saem com o numero que o push na main vai ter.
 name: CI
 
 on:
@@ -44,30 +67,88 @@ permissions:
   contents: read
 
 jobs:
-  versao:
+  esteira:
+    # OBRIGATORIO declarar aqui: um workflow reutilizavel nunca recebe mais
+    # permissao do que quem o chama concede.
     permissions:
-      contents: read
-    uses: slipalison/github-workflows/.github/workflows/versao.yml@main
+      contents: write        # tag e release (`lancar`, so na main)
+      # Sem imagem, mas o job `alias` do lancar.yml (pulado aqui) pede
+      # `packages: write`, e a checagem de permissao e estatica: sem ela o
+      # run morre em startup_failure.
+      packages: write
+      security-events: write # SARIF das varreduras e do CodeQL
+      actions: read          # CodeQL
+    uses: slipalison/github-workflows/.github/workflows/pipeline.yml@main
     with:
       versao_inicial: "0.1.0"
 
-  qualidade:
-    permissions:
-      contents: read
-    uses: slipalison/github-workflows/.github/workflows/qualidade.yml@main
-    with:
+      # ------------------------------------------------------- qualidade ----
       # O Tauri compila tres vezes no Windows (clippy, llvm-cov e release), e
       # o primeiro run nao tem cache: os 20 minutos padrao nao bastam.
-      timeout: 60
-      # `versao` fixa o toolchain: o clippy do CI e o mesmo da maquina de quem
-      # commitou, e um lint novo do stable nao reprova o PR de ninguem.
-      # `build_release` nomeia o pacote do binario do app no workspace.
+      timeout_qualidade: 60
+      # `build_release` nomeia o pacote do binario do app no workspace, e o
+      # Tauri empacota esse mesmo pacote; `caminho_tauri` e onde mora o
+      # tauri.conf.json. `binarios_extra` e o CLI que vai solto na release. O
+      # `versao` de cada componente fixa o toolchain, para o clippy do CI ser
+      # o mesmo da maquina de quem commitou; a versao do PRODUTO o pipeline
+      # passa sozinho a quem tem `carimbar_versao`.
       componentes: |
         [
           {"nome":"app-linux","linguagem":"rust","versao":"1.98","cobertura":80,
-           "pacotes_sistema":"libwebkit2gtk-4.1-dev libudev-dev",
-           "auditoria":true,"build_release":"meu-app"},
+           "so":"ubuntu-22.04",
+           "pacotes_sistema":"libwebkit2gtk-4.1-dev libudev-dev librsvg2-dev",
+           "auditoria":true,"build_release":"meu-app",
+           "empacotar_tauri":true,"caminho_tauri":"apps/meu-app/src-tauri",
+           "binarios_extra":"meu-cli","carimbar_versao":true},
           {"nome":"app-windows","linguagem":"rust","versao":"1.98","so":"windows-latest",
-           "cobertura":0,"build_release":"meu-app"},
-          {"nome":"ui","linguagem":"node","versao":"24","caminho":"ui"}
+           "cobertura":0,"build_release":"meu-app",
+           "empacotar_tauri":true,"caminho_tauri":"apps/meu-app/src-tauri",
+           "binarios_extra":"meu-cli","carimbar_versao":true},
+          {"nome":"ui","linguagem":"node","versao":"24","caminho":"apps/meu-app","cobertura":80}
         ]
+
+      # ---------------------------------------------------------- lancar ----
+      # So os componentes que empacotam (`pacotes-app-linux` e
+      # `pacotes-app-windows`). `pacotes-*` casaria tambem o artefato que
+      # qualquer outro job do run subisse com esse prefixo, inclusive um job
+      # que roda codigo de terceiro, como o `ui` com as dependencias npm.
+      artefatos_release: "pacotes-app-*"
+      changelog: CHANGELOG.md
+
+      # ------------------------------------------------------- seguranca ----
+      # Repositorio PUBLICO: o CodeQL e gratuito e publica na aba Security.
+      # Rust e JS/TS sem build (`build-mode: none`), e `actions` le os proprios
+      # workflows. Em privado sem GHAS, deixe '[]' (ver o README).
+      linguagens_codeql: '["rust","javascript-typescript","actions"]'
+
+      # ----------------------------------------------------------- sonar ----
+      # O job do Sonar roda os testes DE NOVO, em paralelo com a qualidade
+      # (o custo aceito no README). `comando_testes` escreve os dois LCOV que
+      # os parametros apontam, e o `cargo llvm-cov` dele compila o workspace:
+      # por isso as mesmas bibliotecas do webview (`sonar_pacotes_sistema`) e
+      # o mesmo toolchain (`sonar_versao_linguagem`). O librsvg fica de fora:
+      # so o AppImage o usa. O analisador de Rust do Sonar em si nao compila
+      # nem roda o Clippy (medido no ddc-control, ver o README); o Clippy com
+      # `-D warnings` e portao do job de qualidade. O `ddc-control` guarda esse comando num script
+      # do repositorio, que roda na maquina de quem escreve tambem.
+      #
+      # A Analise Automatica do SonarQube Cloud precisa estar DESLIGADA no
+      # projeto: com ela ligada, o scanner do CI reprova.
+      sonar_projeto: slipalison_meu-app
+      sonar_linguagem: rust
+      sonar_versao_linguagem: "1.98"
+      sonar_pacotes_sistema: "libwebkit2gtk-4.1-dev libudev-dev"
+      sonar_comando_testes: bash scripts/ci/sonar-coverage.sh
+      # Testes do Rust ficam em `tests.rs` e em `tests/`: as duas listas de
+      # padroes sao iguais, para as fontes e os testes serem conjuntos
+      # disjuntos (o Sonar recusa arquivo indexado duas vezes).
+      sonar_parametros: |
+        sonar.sources=crates,apps/meu-app/src,apps/meu-app/src-tauri/src
+        sonar.tests=crates,apps/meu-app/src-tauri/src,apps/meu-app/tests
+        sonar.exclusions=**/tests.rs,**/tests/**
+        sonar.test.inclusions=**/tests.rs,**/tests/**
+        sonar.rust.cargo.manifestPaths=Cargo.toml
+        sonar.rust.lcov.reportPaths=resultados/lcov.info
+        sonar.javascript.lcov.reportPaths=resultados/lcov-ui.info
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

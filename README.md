@@ -26,6 +26,29 @@ repositório poliglota .NET + dois frontends, monorepo Rust + React numa imagem
 só, repositório privado, e app desktop Rust/Tauri testado em Linux e Windows
 ([`ci-rust-desktop.yml`](exemplos/ci-rust-desktop.yml)).
 
+## O mínimo exigido
+
+Todo repositório de aplicação entra pelo `pipeline.yml`, seja serviço, pacote
+ou app desktop. Chamar as peças avulsas também funciona, e é esse o problema:
+`versao` + `qualidade` + `lancar` publicam uma release sem varredura de
+segurança, sem Sonar e sem portão, e nada no painel diz que faltou alguma
+coisa. O `ddc-control` publicou a v0.1.0 assim, e só deixou de publicar em
+2026-09-28.
+
+| Etapa | Exigida | O que o `Portao` faz |
+|---|---|---|
+| `qualidade`: lint, testes e cobertura | sempre | reprova se falhar. O piso é o `cobertura` de cada componente, e `0` desliga o piso daquele componente |
+| `seguranca`: Gitleaks, TruffleHog, Semgrep, Trivy (SCA) e SBOM | sempre | reprova se falhar. Só sai pulada num push na branch de produção com `seguranca_na_main: false` |
+| `sonar`: análise e Quality Gate | sempre, ou dispensa escrita | reprova se falhar, e **reprova também sem `sonar_projeto` e sem `sonar_dispensa`**. A dispensa aparece no painel e num `::warning::` em todo run |
+| `versao`: Conventional Commits | sempre, salvo `versionar: false` | reprova commit fora do padrão |
+| CodeQL | em repositório público | não confere: `linguagens_codeql` vazio desliga, porque em privado sem GHAS ele não tem onde publicar ([Sonar para todo mundo](#sonar-para-todo-mundo-público-e-privado)) |
+| `imagem` e `publicar` | só em serviço | pulados com `imagem` e `app` vazios |
+
+O `Portao` é um check só, e é ele que vai no ruleset da branch de produção,
+como status check obrigatório. O nome é o do job que chama mais `/ Portao`:
+`esteira / Portao` nos exemplos. Sem esse check no ruleset, um PR com a
+esteira vermelha continua mergeável.
+
 ---
 
 ## O desenho
@@ -198,7 +221,8 @@ esquecido não dá erro, só deixa de ter a proteção. Aqui isso é
 | Imagem varrida **antes** de publicar | [`build-push.yml`](.github/workflows/build-push.yml) | A versão anterior publicava e só depois varria: uma imagem com CRITICAL ficava no GHCR mesmo com o job vermelho. |
 | Segredo varrido no **histórico inteiro** | [`seguranca.yml`](.github/workflows/seguranca.yml) | Um segredo removido do HEAD continua em qualquer clone. Achado ali significa **rotacionar**, não apagar a linha. |
 | `concurrency` com `cancel-in-progress` | exemplos | Impede que um run obsoleto ainda escreva no GitOps. |
-| Tag e release só com `GITHUB_TOKEN`, no último job | [`lancar.yml`](.github/workflows/lancar.yml) | `contents: write` existe num job só, depois de todos os portões, e nunca em pull request. Nenhum PAT: tudo o que precisa da versão acontece no mesmo run. Assunto de commit é texto de terceiro — entra nas notas por arquivo, nunca por linha de comando. |
+| Ferramenta que entra no pacote vem com sha256 | [`qualidade.yml`](.github/workflows/qualidade.yml) | O `tauri-cli`, o `cargo-llvm-cov` e o `cargo-audit` chegam como binário de versão fixa, com o sha256 conferido. O AppImage também: o bundler do Tauri baixaria sem hash o `AppRun` (o ponto de entrada do pacote), o `linuxdeploy` e o plugin de saída da release `continuous`, e o `appimagetool` baixaria o runtime da `continuous`. O passo `Ferramentas do AppImage` traz os quatro antes, de releases versionadas, e o job reprova se o bundler ainda baixar algo ou se o AppImage não começar com o runtime conferido ([detalhes](#empacotamento-tauri-e-versão-carimbada)). Nenhuma dessas releases é imutável no GitHub: o dono pode trocar o arquivo sob o mesmo nome, e é o sha256 que faz o job reprovar em vez de empacotar o arquivo trocado. No Windows, o WiX e o NSIS o bundler confere com o hash fixo no código dele, que no NSIS ainda é sha1. |
+| Tag e release só com `GITHUB_TOKEN`, no último job | [`lancar.yml`](.github/workflows/lancar.yml) | `contents: write` existe num job só, depois de todos os portões, e nunca em pull request. Nenhum PAT: tudo o que precisa da versão acontece no mesmo run. Assunto de commit e CHANGELOG são texto de terceiro — entram nas notas por arquivo, nunca por linha de comando. Os pacotes anexados levam um `SHA256SUMS`. A saída de rede do job é `block`, com quatro destinos medidos num ensaio: `github.com` (checkout), `api.github.com` (tag e release), `uploads.github.com` (anexos) e `results-receiver.actions.githubusercontent.com` (artefatos). O egresso efetivo é maior que esses quatro: em `block`, o harden-runner 2.21.1 libera sozinho os domínios do GitHub que busca em `api.github.com/meta` (`github.com`, `*.github.com`, `*.githubapp.com`, `ghcr.io` e as 20 contas de blob `productionresultssa0..19.blob.core.windows.net`, de onde vem o zip dos artefatos). O que fica bloqueado é o resto da internet. |
 
 O CI deste repositório roda `pinar_actions.py --verificar`, que **falha** se
 algum `uses:` escapar por tag ou divergir do lock.
@@ -544,10 +568,81 @@ arquivo lá em vez de apontar para cá.
 | `versionar` | `true` | desliga tudo isto |
 | `commits_sem_tipo` | `reprovar` | `patch` (vira correção) ou `ignorar` (não conta) |
 | `versao_inicial` | `1.0.0` | primeira tag |
-| `tag_movel_major` | `false` | também move `v1`, `v2`… — para repositório de templates e actions |
+| `tag_movel_major` | `false` | também move `v1`, `v2`… — para repositório de templates e actions. Nunca junto com `rascunho` (ver abaixo): reprova. |
 
 Quem chama precisa conceder `contents: write` (tag e release) e `packages: write`
 (alias da imagem).
+
+### Pacotes na release
+
+Quem publica instalador, e não imagem (um app desktop), usa o mesmo
+`pipeline.yml`, com dois inputs a mais. Os dois são opcionais, e sem eles nada
+muda:
+
+| Input do `pipeline.yml` | Vira, no `lancar.yml` | |
+|---|---|---|
+| `artefatos_release` | `artefatos` | os pacotes deste run que vão anexados |
+| `changelog` | `changelog` | a seção do CHANGELOG que abre as notas |
+
+O [`lancar.yml`](.github/workflows/lancar.yml) chamado direto recebe esses
+dois e mais o `rascunho`. Isso vale para um repositório que não é aplicação: chamado assim,
+ele não passa pela segurança, pelo Sonar nem pelo portão
+([O mínimo exigido](#o-mínimo-exigido)).
+
+| Input do `lancar.yml` | Padrão | |
+|---|---|---|
+| `artefatos` | `""` | padrão de nome dos artefatos **deste run** a anexar, os do [empacotamento Tauri](#empacotamento-tauri-e-versão-carimbada). Use o mais estreito que case só os componentes que empacotam (`pacotes-app-*`, e não `pacotes-*`): um padrão largo anexaria o artefato de qualquer outro job do run, inclusive de um que rode código de terceiro, como um `npm ci`. |
+| `changelog` | `""` | caminho de um CHANGELOG no formato Keep a Changelog. A seção `## [<versão>]`, ou a `## [Unreleased]` se ela não existir, abre as notas; as notas dos commits vêm depois. |
+| `rascunho` | `false` | cria a release como **rascunho**: sem tag e sem publicar. Nunca junto com `tag_movel_major`: reprova. |
+
+O que o job faz com eles, em ordem:
+
+1. **Confere as entradas** sem rede: `artefatos` só com `[A-Za-z0-9_.*-]`, sem
+   `/` nem espaço; `changelog` relativo, sem `/` no começo e sem `..`: a seção
+   dele vai para o corpo público da release, e um caminho absoluto publicaria
+   um arquivo qualquer do runner. Os dois chegam por `env` e
+   passam por `[[ =~ ]]`, que casa a string inteira. `rascunho` com
+   `tag_movel_major` reprova: o rascunho não cria nem a tag da versão, mas a
+   `vN` é tag de verdade, a que os consumidores usam, e o ensaio a moveria para
+   um commit que nunca passou pela `main`. O passo `Mover a tag de major` ainda
+   tem `if: inputs.tag_movel_major && !inputs.rascunho`, como segunda trava.
+2. **Baixa os pacotes antes da release** (`download-artifact`, `merge-multiple`)
+   e escreve um `SHA256SUMS` com só os nomes, feito de dentro da pasta: quem
+   baixa confere com `sha256sum -c --ignore-missing SHA256SUMS`. Padrão que não
+   casa nada, subdiretório ou nome fora de `[A-Za-z0-9._+-]` reprova.
+3. **Monta as notas** por arquivo, nunca por linha de comando.
+4. **Apaga um rascunho velho da mesma tag**, pelo id: o que sobra de um ensaio
+   ou de um run cancelado. Release publicada nunca é apagada; se já existir
+   uma, a checagem da tag reprova antes, como sempre.
+5. **Cria a release com os anexos**: o `gh release create` com arquivos cria um
+   rascunho, sobe todos e só então publica. Uma release publicada nunca fica
+   sem pacote.
+
+O job roda com a saída de rede em `block` (ver [Segurança](#segurança)): no
+ensaio que mediu a lista, os sete pacotes do `ddc-control` (~100 MB) foram
+baixados, somados e anexados em 20 s.
+
+**O ensaio.** Um rascunho não cria a tag nem aparece para quem não tem escrita
+no repositório. Foi assim que o `ddc-control` provou o job inteiro antes da
+v0.1.0, chamando o `lancar.yml` direto numa branch `ensaio-release/*`. O
+primeiro push de verdade na `main` apaga o rascunho e publica a release no
+lugar.
+
+**Pelo `pipeline.yml` não há ensaio.** O rascunho teria de passar pelos
+portões, e o SonarQube Cloud Free só analisa a branch principal e os pull
+requests. Medido no `ddc-control` (run 36498449337): o relatório da branch de
+ensaio sobe, e a consulta do Quality Gate volta *"Not authorized or project not
+found"*. Pular o Sonar no ensaio seria abrir a porta que o pipeline fecha. Os
+pacotes de todo pull request ficam como artefato do run, para baixar e
+instalar.
+
+**Não ensaie perto do merge.** Com anexos, o `gh release create` da `main`
+também passa por um rascunho enquanto sobe os arquivos. Um ensaio da mesma
+versão rodando nessa hora apagaria esse rascunho em trânsito no passo
+`Apagar rascunho velho da mesma tag`, e a release da `main` falharia sem
+publicar nada. Não há perda de segurança, mas o push precisa de um run novo.
+Deixe o ensaio terminar antes do merge, e não empurre `ensaio-release/*`
+enquanto o run da `main` não acabar.
 
 ### Por que um script próprio
 
@@ -702,9 +797,22 @@ componentes: |
 | `pacotes_sistema` | pacotes apt separados por espaço, instalados antes do build. Só em runner Linux; a lista passa por regex e chega ao `apt-get` por `env`. |
 | `auditoria` | rust: `true` roda `cargo audit`. Só em runner Linux. |
 | `build_release` | rust: um pacote do workspace; o passo `Build <pacote> (release)` roda `cargo build -p <pacote> --release --locked`. |
+| `empacotar_tauri` | rust: `true` empacota o app Tauri de `build_release` com o `cargo tauri build`: deb, rpm e AppImage no Linux; msi e instalador NSIS no Windows. Exige `build_release` e `caminho_tauri`. |
+| `caminho_tauri` | diretório do `tauri.conf.json`, relativo à raiz do checkout, sem `/` no começo e sem `..`. Só com `empacotar_tauri`. |
+| `binarios_extra` | rust: pacotes do workspace, separados por espaço, publicados como arquivo: `<bin>-<alvo>.tar.gz` no Linux, `<bin>-<alvo>.zip` no Windows, com o binário e o `LICENSE` da raiz. |
+| `carimbar_versao` | rust: `true` escreve o input `versao` (a do produto) no `Cargo.toml` antes do build de release e confere o `--version` de cada binário extra. |
 
-Os quatro últimos são opcionais. Sem eles o componente roda os mesmos passos e
-comandos de antes, no `ubuntu-latest`.
+Os campos a partir de `so` são opcionais. Sem eles o componente roda os mesmos
+passos e comandos de antes, no `ubuntu-latest`, com duas diferenças em todo
+componente rust. A chave do cache do `target/` ganhou o runner (ver abaixo), e
+o primeiro run depois da mudança compila sem cache. E o passo novo `Alvo do
+runner` roda antes do fmt: guarda a tabela SO → alvo, que antes morava no
+passo do `cargo-llvm-cov` (mesma URL, mesmo hash), e faz um `cargo metadata
+--no-deps`, sem rede.
+
+O `qualidade.yml` também recebe o input `versao`, a versão do **produto**
+(`1.4.0`), a que o job `versao` calculou. Não confundir com o campo `versao` de
+um componente, que é a versão da linguagem. Só `carimbar_versao` o lê.
 
 `fail-fast: false` de propósito: o padrão mata os outros componentes quando um
 falha e mostra só o primeiro erro — com três componentes, isso vira três rodadas
@@ -738,7 +846,13 @@ o caminho é conhecido.
 
 No Sonar, as propriedades são `sonar.rust.lcov.reportPaths` (ou
 `sonar.rust.cobertura.reportPaths`) e `sonar.rust.cargo.manifestPaths`. O
-analisador roda o Clippy sozinho — `sonar.rust.clippy.enabled` vem ligado.
+analisador de Rust do SonarQube Cloud não compila e não roda o Clippy: medido
+no `ddc-control` (2026-09-28), o sensor `Rust Enterprise` analisou o workspace
+em 4,6 s com o perfil *Sonar way comprehensive*, sem uma linha de Clippy no log.
+O Clippy com `-D warnings` é portão do job de qualidade. O que compila no job do
+Sonar é o `comando_testes`, que mede a cobertura: por isso ele pede o toolchain
+(`sonar_versao_linguagem`) e, num app Tauri, as bibliotecas de sistema
+(`sonar_pacotes_sistema`).
 
 #### Windows, pacotes do sistema, auditoria e build de release
 
@@ -783,13 +897,95 @@ teste. Só um `cargo build --release --locked` prova que o binário de produçã
 compila — no Tauri, com `custom-protocol` e os recursos do Windows. O passo
 vem depois dos testes e se chama `Build <pacote> (release)`.
 
-**Binário pronto, versão fixa, hash conferido.** O `cargo-llvm-cov` (0.9.1) e
-o `cargo-audit` (0.22.2) chegam como binário publicado na release de cada
-projeto, e não por `cargo install`, que levaria minutos compilando a ferramenta
-na versão que o crates.io tiver hoje. A versão fixa diz o que baixar. O sha256,
-tirado do `digest` que o GitHub mostra em cada arquivo da release, prova que
-chegou isso. Arquivo que não bate não é extraído. Para subir uma delas, troque
-a versão e o hash juntos, num PR.
+**Binário pronto, versão fixa, hash conferido.** O `cargo-llvm-cov` (0.9.1),
+o `cargo-audit` (0.22.2) e o `tauri-cli` (2.12.0) chegam como binário publicado
+na release de cada projeto, e não por `cargo install`, que levaria minutos
+compilando a ferramenta na versão que o crates.io tiver hoje. A versão fixa diz
+o que baixar. O sha256, tirado do `digest` que o GitHub mostra em cada arquivo
+da release, prova que chegou isso. Arquivo que não bate não é extraído. Para
+subir uma delas, troque a versão e o hash juntos, num PR.
+
+#### Empacotamento Tauri e versão carimbada
+
+Entrou em 2026-09-28, também com o `ddc-control`: o CI que só compila e testa
+não entrega nada para quem quer instalar. Com os quatro campos novos, o mesmo
+job que testou produz os instaladores, e o `lancar.yml` os anexa à release
+(ver [Pacotes na release](#pacotes-na-release)).
+
+**A versão é carimbada, não escrita.** O `Cargo.toml` do repositório diz
+`0.0.0`, e o passo `Carimbar versao` escreve nele a versão que o job `versao`
+calculou, antes do build de release. É a mesma ideia do `helm package
+--version` do `helm-charts`: nenhum número escrito à mão e nenhum commit de bot
+na `main`. Só o `version` do `[workspace.package]` (ou do `[package]`) muda; o
+`Cargo.lock` acompanha com `cargo update --workspace --offline`, e o passo
+reprova se o lock mudar em qualquer linha além das `version` dos membros. Em
+pull request a versão carimbada é a que o push vai ter, então os artefatos do
+PR já são os pacotes da próxima release. `Conferir versao dos binarios` executa
+cada binário extra com `--version` (o `.exe` no Windows) e reprova se a versão
+não aparecer. O limite do MSI (major e minor até 255, patch até 65535) reprova
+no primeiro passo, antes do checkout.
+
+**Os passos, depois dos testes:** `Carimbar versao`, `Build <pacote> (release)`,
+`Build binarios extra (release)`, `Conferir versao dos binarios`, `Empacotar
+binarios extra`, `Instalar tauri-cli`, `Ferramentas do AppImage` (só no Linux),
+`Empacotar <pacote> (Tauri)` e `Guardar pacotes`. Os nomes são contrato: quem
+chama pode consultá-los pela API.
+
+**Um arquivo por bundler, com a versão no nome e sem espaço.** O Tauri nomeia
+os pacotes pelo `productName` (`DDC Control_0.1.0_amd64.deb`). O passo apaga o
+`bundle/` antigo do `target/` (o cache traz pacotes de runs anteriores), exige
+exatamente um arquivo por bundler, põe o nome do produto em minúsculas com `-`
+no lugar de espaço (`ddc-control_0.1.0_amd64.deb`) e reprova nome sem a versão.
+Tudo vai para `dist/`, na raiz do checkout, e dali para o artefato
+`pacotes-<nome>`. Os binários extra entram no mesmo artefato, como
+`<bin>-<alvo>.tar.gz` ou `.zip` com só o binário e o `LICENSE`. O alvo sai de
+uma tabela só, no passo `Alvo do runner`, que o `cargo-llvm-cov` também lê.
+
+**Linux no `ubuntu-22.04`.** Os pacotes ligam dinamicamente na glibc de onde
+foram construídos: feitos no `ubuntu-latest` (24.04, glibc 2.39), não rodariam
+no Ubuntu 22.04 nem no Debian 12. Por isso o componente Linux que empacota usa
+`so: ubuntu-22.04`, e a chave do cache do `target/` leva o runner: um `target/`
+do 24.04 restaurado no 22.04 desfaria isso calado. As ferramentas também
+precisam rodar lá: o `cargo-audit` vem no pacote musl, estático, porque o gnu
+da 0.22.2 pede a glibc 2.39; o `tauri-cli` 2.12.0 pede no máximo a 2.34. E o
+`relatar-cobertura` pede Python 3.11 (`typing.Self`), mas o `python3` do 22.04
+é o 3.10: com `so` escrito, o job confere o `python3` do runner e, se for mais
+velho, instala o 3.12 com o `setup-python` antes de tudo.
+
+**As ferramentas do AppImage, fixadas e conferidas.** Para montar o AppImage, o
+bundler do Tauri (o `prepare_tools` do tauri-bundler 2.10.0, que o tauri-cli
+2.12.0 usa) baixa sem conferir hash três arquivos que vão para dentro do pacote
+publicado: o `AppRun`, que é o ponto de entrada do AppImage; o `linuxdeploy`; e
+o plugin `linuxdeploy-plugin-appimage` da release `continuous`, que o dono
+troca quando quer. O `appimagetool` de dentro do plugin ainda baixa, também da
+`continuous`, o runtime type2: a cabeça ELF que roda primeiro quando alguém
+abre o AppImage. O passo `Ferramentas do AppImage` baixa os quatro antes, de
+URL fixa, e confere o sha256 de cada um:
+
+| Arquivo | De onde | sha256 |
+|---|---|---|
+| `AppRun-x86_64` | `tauri-apps/binary-releases`, release `apprun-old` | `f30140a4…` |
+| `linuxdeploy-07333c6-x86_64.AppImage` | `tauri-apps/binary-releases`, release `linuxdeploy-07333c6` | `36a2d7e2…` |
+| `linuxdeploy-plugin-appimage.AppImage` | `linuxdeploy/linuxdeploy-plugin-appimage`, release `1-alpha-20250213-1` | `992d502a…` |
+| `runtime-x86_64` | `AppImage/type2-runtime`, release `20251108` | `2fca8b44…` |
+
+Os três primeiros vão para o `$XDG_CACHE_HOME/tauri`, com o nome que o
+`prepare_tools` procura, e ele só baixa o que não existe. O passo Tauri aponta
+o `XDG_CACHE_HOME` para lá. O runtime entra pelo `LDAI_RUNTIME_FILE`, que o
+plugin repassa ao `appimagetool` como `--runtime-file`. O plugin e o runtime
+vêm das últimas releases **versionadas**, e não da `continuous`. Duas travas
+provam isso no próprio job: qualquer linha `Downloading` do bundler na saída
+reprova o passo, e o AppImage tem de começar com o runtime conferido, byte a
+byte, fora as seções que o `appimagetool` preenche (digest, update info e
+assinatura). Para subir o `tauri-cli`, confira esta lista no `prepare_tools`
+da versão nova: se um nome mudar, a primeira trava reprova. O
+`bundle.useLocalToolsDir` do `tauri.conf.json` não é suportado, porque muda o
+diretório de ferramentas, e a mesma trava o acusa.
+
+**No Windows**, o Git Bash não traz `zip`: o `.zip` do binário extra sai do
+7-Zip da imagem do runner, que também abre o `.zip` do `tauri-cli`. O WiX e o
+NSIS o próprio bundler baixa com hash fixo no código (`validating hash` no
+log): sha256 no WiX, sha1 no NSIS e no `nsis_tauri_utils`.
 
 ---
 
@@ -805,7 +1001,13 @@ a versão e o hash juntos, num PR.
    write` para o SARIF. Sem isso o run morre em `startup_failure` com
    *"requesting 'packages: write', but is only allowed 'packages: read'"*, que
    **não aparece no log de passo nenhum**.
-4. **`SONAR_TOKEN`** no repositório, para a análise.
+4. **`SONAR_TOKEN`** no repositório, para a análise, e no SonarQube Cloud a
+   **Análise Automática desligada** no projeto (Administration → Analysis
+   Method). Com ela ligada, o scanner do CI reprova com *"You are running CI
+   analysis while Automatic Analysis is enabled"*. E ela não substitui o CI:
+   não recebe cobertura, e no `ddc-control` não analisou uma linha de Rust.
 5. **Imagem acessível ao cluster.** Pacote privado no GHCR sem `imagePullSecret`
    deixa o pod em `ImagePullBackOff` dizendo que não encontrou a imagem — o que
    não parece um problema de credencial.
+6. **O `Portao` como status check obrigatório** no ruleset da branch de
+   produção ([O mínimo exigido](#o-mínimo-exigido)).

@@ -27,6 +27,29 @@ name: Lancar versao
 # run do proprio github-workflows (que nao tem imagem):
 #   "The nested job 'alias' is requesting 'packages: write', but is only
 #    allowed 'packages: none'"  -> startup_failure, sem job nenhum.
+#
+# PACOTES, SOMAS, CHANGELOG E RASCUNHO — tudo opcional
+# ----------------------------------------------------
+# `artefatos` e um padrao de nome de artefato DESTE run, o mais estreito que
+# case so os componentes que empacotam (`pacotes-app-*`, e nao `pacotes-*`):
+# um padrao largo anexaria o artefato de qualquer outro job do run, inclusive
+# de um que rode codigo de terceiro, como um `npm ci`. Os arquivos sao
+# baixados ANTES da release, entram nela como anexos junto de um `SHA256SUMS`,
+# e o `gh release create` so publica depois de subir todos — uma release
+# publicada nunca fica sem pacote. `changelog` e o caminho de um CHANGELOG no
+# formato Keep a Changelog: a secao `## [<versao>]`, ou a `## [Unreleased]` se
+# ela nao existir, abre as notas. `rascunho: true` cria a release como
+# RASCUNHO, que nao cria a tag e nao e publico: e como um repositorio ensaia o
+# job inteiro fora da main. Antes de criar, um rascunho que ja exista com a
+# MESMA tag e apagado (o que sobra de um ensaio ou de um run cancelado);
+# release publicada nunca. Sem os tres, os passos e comandos sao os de antes.
+#
+# NAO ENSAIE PERTO DO MERGE. Com anexos, o `gh release create` da main tambem
+# passa por um rascunho enquanto sobe os arquivos. Um ensaio da MESMA versao
+# rodando nessa hora o apagaria no `Apagar rascunho velho`, e a release da
+# main falharia sem publicar nada (sem perda de seguranca, mas o push precisa
+# de um run novo). Deixe o ensaio terminar antes do merge, e nao empurre
+# `ensaio-release/*` enquanto o run da main nao acabar.
 
 on:
   workflow_call:
@@ -53,7 +76,7 @@ on:
         description: >-
           Tambem aponta a tag vN (v1, v2) para este commit, como fazem as actions
           do GitHub. Para repositorio de templates e actions; sem sentido para
-          servico.
+          servico. Nunca junto com `rascunho`: reprova.
         required: false
         type: boolean
         default: false
@@ -65,6 +88,28 @@ on:
         required: false
         type: string
         default: "1.0.0"
+      artefatos:
+        description: >-
+          Padrao de nome dos artefatos deste run a anexar a release, o mais
+          estreito possivel (`pacotes-app-*`). Vazio nao baixa nem anexa nada.
+        required: false
+        type: string
+        default: ""
+      rascunho:
+        description: >-
+          Cria a release como rascunho: sem tag e sem publicar. Para ensaiar o
+          job fora da main. Nunca junto com `tag_movel_major`: reprova.
+        required: false
+        type: boolean
+        default: false
+      changelog:
+        description: >-
+          CHANGELOG no formato Keep a Changelog (`CHANGELOG.md`). A secao da
+          versao, ou a `[Unreleased]`, abre as notas. Vazio: so as notas dos
+          commits.
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -88,7 +133,7 @@ jobs:
             pkg-containers.githubusercontent.com:443
             api.github.com:443
 
-      - name: Conferir as entradas
+      - name: Conferir imagem e digest
         # O nome da imagem e o digest vao para uma linha de comando. Sao saidas
         # de outro job da mesma esteira, mas um `[[ =~ ]]` custa nada e fecha a
         # porta para sempre.
@@ -144,6 +189,8 @@ jobs:
     # liberado, falho nao.
     if: always() && (needs.alias.result == 'success' || needs.alias.result == 'skipped')
     runs-on: ubuntu-latest
+    # Medido no ensaio do ddc-control (run 36432836623): 20 s com os sete
+    # pacotes (~100 MB) baixados, somados e subidos de novo.
     timeout-minutes: 5
     permissions:
       contents: write
@@ -152,21 +199,77 @@ jobs:
         uses: slipalison/github-workflows/.github/actions/preparar@main
         with:
           historico-completo: "true"
-          # Este job segura um token com escrita no repositorio. Como no deploy,
-          # a saida de rede e uma lista fechada.
+          # Este job segura um token com escrita no repositorio. Como no
+          # deploy, a saida de rede e uma lista fechada, e cada destino foi
+          # MEDIDO: ensaio do ddc-control em `audit` (run 36432836623), no log
+          # do pos-passo do harden-runner (`endpoint called ...`). Os
+          # comentarios ficam aqui fora; dentro do bloco `|` virariam destino.
+          #   github.com          o checkout do `Preparar`, historico inteiro
+          #   api.github.com      o gh: a tag existe?, o rascunho velho, a
+          #                       release e o id dela
+          #   uploads.github.com  o `gh release create` subindo os anexos
+          #   results-receiver.actions.githubusercontent.com
+          #                       `Baixar pacotes`: o servico de artefatos
+          # O EGRESSO REAL E MAIOR QUE ESTA LISTA. Em `block`, o harden-runner
+          # 2.21.1 libera sozinho os dominios do GitHub que busca em
+          # api.github.com/meta e mostra no log (`fetched GitHub meta
+          # domains`, ensaio 36435174227): github.com, *.github.com (que ja
+          # cobre api. e uploads.), *.githubapp.com, ghcr.io e as 20 contas de
+          # blob productionresultssa0..19.blob.core.windows.net, de onde vem o
+          # zip dos artefatos (medido o sa3). A lista abaixo e o que o job USA,
+          # medido; o que fica bloqueado e todo o resto da internet.
           egresso: block
           destinos-liberados: |
             github.com:443
             api.github.com:443
+            uploads.github.com:443
+            results-receiver.actions.githubusercontent.com:443
 
       - name: Conferir as entradas
+        # Sem arquivo, sem rede e sem outra variavel: so os valores que vao
+        # virar argumento de comando ou caminho, e uma combinacao proibida.
+        # `artefatos` vira `pattern` de uma action e `changelog`, caminho de
+        # arquivo; os dois chegam aqui por `env` e passam por `[[ =~ ]]`, que
+        # casa a string inteira (um grep casaria linha a linha e deixaria
+        # passar um valor com quebra de linha). O padrao de artefato nao tem
+        # `/`, espaco nem metacaractere de shell alem do `*`.
+        #
+        # O CHANGELOG E RELATIVO AO REPOSITORIO: sem `/` no comeco e sem `..`.
+        # A secao dele vai para o corpo PUBLICO da release, e um caminho
+        # absoluto (`/etc/passwd`) publicaria um arquivo qualquer do runner.
+        #
+        # TAG MOVEL NUNCA NUM RASCUNHO. O rascunho e o ensaio fora da main: nao
+        # cria nem a tag da versao. Mas `Mover a tag de major` cria ou move a
+        # `vN` de verdade, a que os consumidores do repositorio usam, e num
+        # ensaio a apontaria para um commit que nunca passou pela main. A
+        # combinacao reprova aqui, antes de tudo; o `if` daquele passo e a
+        # segunda trava. Os dois booleanos valem `false` sem a variavel, para o
+        # script rodar sozinho fora do Actions; no job o `env` sempre os traz.
         env:
           VERSAO: ${{ inputs.versao }}
           TAG: ${{ inputs.tag }}
+          ARTEFATOS: ${{ inputs.artefatos }}
+          CHANGELOG: ${{ inputs.changelog }}
+          MOVEL: ${{ inputs.tag_movel_major }}
+          RASCUNHO: ${{ inputs.rascunho }}
         run: |
           set -euo pipefail
           [[ "$VERSAO" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::versao invalida: $VERSAO"; exit 1; }
           [ "$TAG" = "v$VERSAO" ] || { echo "::error::tag $TAG nao corresponde a versao $VERSAO"; exit 1; }
+          if [ -n "$ARTEFATOS" ] && ! [[ "$ARTEFATOS" =~ ^[A-Za-z0-9_.*-]+$ ]]; then
+            echo "::error::artefatos: um padrao de nome de artefato, so [A-Za-z0-9_.*-]: $ARTEFATOS"
+            exit 1
+          fi
+          if [ -n "$CHANGELOG" ]; then
+            if ! [[ "$CHANGELOG" =~ ^[A-Za-z0-9_./-]+$ ]] || [[ "$CHANGELOG" == /* ]] || [[ "$CHANGELOG" == *..* ]]; then
+              echo "::error::changelog: caminho relativo ao repositorio, so [A-Za-z0-9_./-], sem '/' no comeco e sem '..': $CHANGELOG"
+              exit 1
+            fi
+          fi
+          if [ "${MOVEL:-false}" = "true" ] && [ "${RASCUNHO:-false}" = "true" ]; then
+            echo "::error::tag_movel_major com rascunho: o ensaio moveria a tag vN de verdade para um commit fora da main."
+            exit 1
+          fi
 
       - name: Recalcular e conferir
         # Mesmo script, mesma resposta — ou o run para aqui.
@@ -196,24 +299,154 @@ jobs:
             exit 1
           fi
 
+      - name: Baixar pacotes
+        # Todos os artefatos do run que casam com o padrao, soltos numa pasta
+        # so (`merge-multiple`). Sem `run-id`: dentro do mesmo run, a action ja
+        # acha os artefatos dos jobs anteriores.
+        if: inputs.artefatos != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: ${{ inputs.artefatos }}
+          merge-multiple: true
+          path: pacotes-baixados
+
+      - name: Somas SHA256
+        # `SHA256SUMS` no formato do `sha256sum`, feito DE DENTRO da pasta: so
+        # o nome de cada arquivo, para `sha256sum -c SHA256SUMS` funcionar
+        # na pasta de quem baixa. Padrao que nao casou nada, subdiretorio
+        # (artefato com pasta dentro, que o anexo nao representa) ou nome fora
+        # de [A-Za-z0-9._+-] reprovam: o anexo leva o nome do arquivo, e um
+        # nome com espaco quebraria o `sha256sum -c` de quem baixa.
+        if: inputs.artefatos != ''
+        working-directory: pacotes-baixados
+        run: |
+          set -euo pipefail
+          if [ -n "$(find . -mindepth 1 -type d)" ]; then
+            echo "::error::artefatos: os pacotes baixados tem subdiretorio; esperado so arquivos."
+            exit 1
+          fi
+          mapfile -t arquivos < <(find . -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
+          if [ "${#arquivos[@]}" = 0 ]; then
+            echo "::error::artefatos: nenhum arquivo nos artefatos do run."
+            exit 1
+          fi
+          for arquivo in "${arquivos[@]}"; do
+            if ! [[ "$arquivo" =~ ^[A-Za-z0-9._+-]+$ ]] || [ "$arquivo" = "SHA256SUMS" ]; then
+              echo "::error::artefatos: nome de arquivo recusado: $arquivo"
+              exit 1
+            fi
+          done
+          sha256sum -- "${arquivos[@]}" > "$RUNNER_TEMP/SHA256SUMS"
+          mv "$RUNNER_TEMP/SHA256SUMS" SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Montar as notas
+        # A secao do CHANGELOG escrita por gente abre as notas; as notas dos
+        # commits, que o `versao` gera, vem depois. `## [<versao>]` se ja
+        # existir (quem fecha a secao antes do push), senao `## [Unreleased]`.
+        # A secao vai ate o proximo `## [`. Tudo por ARQUIVO: texto de
+        # terceiro nunca passa por linha de comando.
+        id: notas
+        if: inputs.changelog != ''
+        env:
+          CHANGELOG: ${{ inputs.changelog }}
+          VERSAO: ${{ inputs.versao }}
+          NOTAS: ${{ steps.calc.outputs.notas }}
+        run: |
+          set -euo pipefail
+          if [ ! -f "$CHANGELOG" ]; then
+            echo "::error::changelog: $CHANGELOG nao existe no repositorio."
+            exit 1
+          fi
+          secao() {
+            awk -v titulo="$1" '
+              index($0, titulo) == 1 { dentro = 1; next }
+              dentro && /^## \[/ { exit }
+              dentro && !texto && /^[[:space:]]*$/ { next }
+              dentro { texto = 1; print }
+            ' "$CHANGELOG"
+          }
+          titulo="## [$VERSAO]"
+          trecho=$(secao "$titulo")
+          if [ -z "${trecho//[[:space:]]/}" ]; then
+            titulo="## [Unreleased]"
+            trecho=$(secao "$titulo")
+          fi
+          if [ -z "${trecho//[[:space:]]/}" ]; then
+            echo "::error::changelog: $CHANGELOG nao tem secao ## [$VERSAO] nem ## [Unreleased] com conteudo."
+            exit 1
+          fi
+          saida="$RUNNER_TEMP/notas-release.md"
+          {
+            printf '%s\n\n' "$trecho"
+            cat "$NOTAS"
+          } > "$saida"
+          echo "Notas: $titulo de $CHANGELOG ($(wc -c < "$saida") bytes)."
+          echo "arquivo=$saida" >> "$GITHUB_OUTPUT"
+
+      - name: Apagar rascunho velho da mesma tag
+        # Um ensaio (`rascunho: true`) ou um run cancelado deixa um RASCUNHO
+        # com a tag desta versao. Rascunho nao cria tag, entao a checagem de
+        # cima nao o ve, e a release nova nasceria ao lado dele. Apaga so
+        # rascunho com a MESMA tag, pelo id; release publicada nunca. A tag
+        # passou pela regex em `Conferir as entradas`. Um ensaio rodando junto
+        # com o lancar da main apagaria o rascunho em transito dela: ver "NAO
+        # ENSAIE PERTO DO MERGE" no cabecalho.
+        if: inputs.artefatos != '' || inputs.rascunho
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          ids=$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" \
+            --jq ".[] | select(.draft == true and .tag_name == \"$TAG\") | .id")
+          apagados=0
+          for id in $ids; do
+            gh api -X DELETE "repos/$GH_REPO/releases/$id"
+            echo "Rascunho $id de $TAG apagado."
+            apagados=$((apagados + 1))
+          done
+          echo "$apagados rascunho(s) de $TAG apagado(s)."
+
       - name: Criar a tag e a release
         # `gh release create` cria a tag no commit alvo e a release de uma vez,
         # com as notas geradas dos commits. As notas entram por ARQUIVO: assunto
         # de commit e texto de terceiro, e nunca passa por uma linha de comando.
+        # Com anexos, o gh cria a release em rascunho, sobe todos e so entao
+        # publica: uma release publicada nunca fica sem pacote. Com
+        # `rascunho`, ela fica rascunho, e a tag so nasce quando alguem a
+        # publicar.
+        id: release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ inputs.tag }}
           VERSAO: ${{ inputs.versao }}
-          NOTAS: ${{ steps.calc.outputs.notas }}
+          NOTAS: ${{ steps.notas.outputs.arquivo || steps.calc.outputs.notas }}
           SHA: ${{ github.sha }}
+          ARTEFATOS: ${{ inputs.artefatos }}
+          RASCUNHO: ${{ inputs.rascunho }}
         run: |
           set -euo pipefail
-          gh release create "$TAG" --target "$SHA" --title "$VERSAO" --notes-file "$NOTAS"
+          args=("$TAG" --target "$SHA" --title "$VERSAO" --notes-file "$NOTAS")
+          if [ "$RASCUNHO" = "true" ]; then args+=(--draft); fi
+          if [ -n "$ARTEFATOS" ]; then
+            mapfile -t anexos < <(find pacotes-baixados -maxdepth 1 -type f | LC_ALL=C sort)
+            args+=("${anexos[@]}")
+          fi
+          gh release create "${args[@]}"
           echo "Release $TAG criada em $SHA."
+          if [ -n "$ARTEFATOS" ] || [ "$RASCUNHO" = "true" ]; then
+            gh api "repos/$GH_REPO/releases?per_page=100" \
+              --jq "first(.[] | select(.tag_name == \"$TAG\")) | \"id=\(.id)\nurl=\(.html_url)\nanexos=\(.assets | length)\"" \
+              >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Mover a tag de major
-        if: inputs.tag_movel_major
+        # Nunca num rascunho, que nao cria nem a tag da versao. O `Conferir as
+        # entradas` ja reprova a combinacao; este `if` e a segunda trava.
+        if: inputs.tag_movel_major && !inputs.rascunho
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -235,12 +468,22 @@ jobs:
           REPO: ${{ github.repository }}
           MOVEL: ${{ inputs.tag_movel_major }}
           VERSAO: ${{ inputs.versao }}
+          RASCUNHO: ${{ inputs.rascunho }}
+          ID: ${{ steps.release.outputs.id }}
+          URL: ${{ steps.release.outputs.url }}
+          ANEXOS: ${{ steps.release.outputs.anexos }}
         run: |
           {
             echo "## Lancamento"
             echo ""
             echo "| | |"
             echo "|---|---|"
-            echo "| Release | [$TAG](https://github.com/$REPO/releases/tag/$TAG) |"
+            if [ "$RASCUNHO" = "true" ]; then
+              echo "| Rascunho | [$TAG]($URL), sem tag |"
+            else
+              echo "| Release | [$TAG](https://github.com/$REPO/releases/tag/$TAG) |"
+            fi
+            if [ -n "$ID" ]; then echo "| id | $ID |"; fi
+            if [ -n "$ANEXOS" ]; then echo "| Anexos | $ANEXOS |"; fi
             if [ "$MOVEL" = "true" ]; then echo "| Tag movel | v${VERSAO%%.*} |"; fi
           } >> "$GITHUB_STEP_SUMMARY"
