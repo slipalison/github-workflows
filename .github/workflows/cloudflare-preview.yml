@@ -1,0 +1,245 @@
+name: Preview na Cloudflare (por PR)
+
+# Publica cada pull request num endereco proprio, pr-<N>.<dominio>, e apaga
+# tudo quando o PR fecha, com merge ou sem. E o preview do basalto sem ArgoCD:
+# la, uma ApplicationSet cria e destroi o ambiente; aqui, um Worker por PR,
+# criado por este workflow e apagado por ele mesmo quando o PR fecha.
+#
+# O QUE CADA ACAO FAZ
+# -------------------
+#   publicar  (PR aberto, a cada push, depois do mesmo portao da producao)
+#     1. build do PR, com o mesmo comando da producao;
+#     2. marca o build como "nao indexar" (X-Robots-Tag e robots.txt), para o
+#        buscador nao tomar o preview pelo site;
+#     3. `wrangler deploy` do Worker <nome>-pr-<N>, com a rota
+#        pr-<N>.<dominio>/*. `--route` na linha de comando SUBSTITUI as rotas
+#        do wrangler.jsonc (wrangler 4: `args.routes ?? config.routes`), entao
+#        os dominios de producao nunca sao tocados;
+#     4. confere que o endereco responde, e deixa o link no PR (um comentario
+#        so, atualizado a cada push).
+#   remover  (PR fechado)
+#     apaga a rota e o Worker; o endereco para de responder. Cada passo aceita
+#     "ja nao existe": rodar de novo nao quebra.
+#
+# O DNS NAO MUDA POR PR
+# ---------------------
+# Como no basalto, um registro curinga `*.<dominio>` (AAAA 100::, proxiado),
+# criado UMA VEZ, faz qualquer pr-<N>.<dominio> chegar a Cloudflare; quem
+# atende e a rota do Worker. Assim o token da esteira nao precisa da permissao
+# de editar DNS — com ela, um token vazado poderia apontar o site para outro
+# lugar. Os registros especificos (o dominio e o www) continuam valendo acima
+# do curinga.
+#
+# POR QUE ROTA, E NAO "CUSTOM DOMAIN"
+# -----------------------------------
+# Custom Domain emite um certificado so para o endereco, e a Cloudflare nao o
+# apaga quando o dominio sai: seria um certificado esquecido por PR. A rota usa
+# o certificado universal da zona, que ja cobre *.<dominio> (um nivel, gratis).
+# Os "preview URLs" nativos dos Workers so existem em workers.dev.
+#
+# O prefixo `pr-` e o mesmo do basalto: uma regra so (Cloudflare Access em
+# pr-*.<dominio>, por exemplo) cobre todos os previews, se um dia precisar.
+#
+# CREDENCIAIS: os mesmos CLOUDFLARE_API_TOKEN e CLOUDFLARE_ACCOUNT_ID do
+# cloudflare.yml, sem permissao a mais. PR de fork e do Dependabot nao recebem
+# secrets; o pipeline.yml pula o preview neles.
+on:
+  workflow_call:
+    inputs:
+      acao:
+        description: "publicar | remover"
+        required: true
+        type: string
+      pr:
+        description: "Numero do pull request"
+        required: true
+        type: number
+      dominio:
+        description: "A zona na Cloudflare (seugoverno.com); o preview vira pr-<N>.<dominio>"
+        required: true
+        type: string
+      zona_id:
+        description: >-
+          Id da zona do dominio (aparece no painel). Vai direto para o token nao
+          precisar da permissao de listar zonas.
+        required: true
+        type: string
+      nome:
+        description: "Prefixo do Worker; vazio = o nome do repositorio. O Worker e <nome>-pr-<N>"
+        required: false
+        type: string
+        default: ""
+      assets:
+        description: >-
+          Diretorio do build servido como arquivo estatico (o `assets.directory`
+          do wrangler), relativo a `caminho`. Com ele, o preview sai marcado
+          como "nao indexar". Vazio pula a marcacao.
+        required: false
+        type: string
+        default: ""
+      caminho:
+        required: false
+        type: string
+        default: "."
+      versao_node:
+        required: false
+        type: string
+        default: ""
+      comando_build:
+        required: false
+        type: string
+        default: "npm ci --ignore-scripts && npm run build"
+    secrets:
+      CLOUDFLARE_API_TOKEN:
+        required: true
+      CLOUDFLARE_ACCOUNT_ID:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    name: Preview
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Um preview por PR de cada vez: um push novo cancela a publicacao
+    # anterior, e fechar o PR cancela uma publicacao em andamento.
+    concurrency:
+      group: preview-cloudflare-${{ github.repository }}-${{ inputs.pr }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      pull-requests: write # o comentario com o endereco
+    env:
+      ACAO: ${{ inputs.acao }}
+      PR: ${{ inputs.pr }}
+      DOMINIO: ${{ inputs.dominio }}
+      ZONA: ${{ inputs.zona_id }}
+      NOME_BASE: ${{ inputs.nome != '' && inputs.nome || github.event.repository.name }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Conferir os parametros
+        run: |
+          set -euo pipefail
+          case "$ACAO" in publicar|remover) ;; *) echo "::error::acao deve ser publicar ou remover, veio '$ACAO'"; exit 1 ;; esac
+          [[ "$PR" =~ ^[1-9][0-9]*$ ]] || { echo "::error::pr invalido: '$PR'"; exit 1; }
+          [[ "$DOMINIO" =~ ^[a-z0-9-]+(\.[a-z0-9-]+)+$ ]] || { echo "::error::dominio invalido: '$DOMINIO'"; exit 1; }
+          [[ "$ZONA" =~ ^[0-9a-f]{32}$ ]] || { echo "::error::zona_id invalido"; exit 1; }
+          nome="$(printf '%s' "$NOME_BASE" | tr '[:upper:]_.' '[:lower:]--')-pr-${PR}"
+          [[ "$nome" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || { echo "::error::nome de Worker invalido: '$nome'"; exit 1; }
+          {
+            echo "HOST=pr-${PR}.${DOMINIO}"
+            echo "WORKER=${nome}"
+          } >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: inputs.acao == 'publicar'
+        with:
+          persist-credentials: false
+
+      - name: Preparar
+        if: inputs.acao == 'publicar'
+        uses: slipalison/github-workflows/.github/actions/preparar@main
+        with:
+          linguagem: node
+          versao: ${{ inputs.versao_node }}
+
+      - name: Build
+        if: inputs.acao == 'publicar'
+        working-directory: ${{ inputs.caminho }}
+        env:
+          COMANDO: ${{ inputs.comando_build }}
+        run: bash -euo pipefail -c "$COMANDO"
+
+      - name: Marcar como "nao indexar"
+        if: inputs.acao == 'publicar' && inputs.assets != ''
+        working-directory: ${{ inputs.caminho }}
+        env:
+          ASSETS: ${{ inputs.assets }}
+        run: |
+          set -euo pipefail
+          [ -d "$ASSETS" ] || { echo "::error::assets '$ASSETS' nao existe depois do build"; exit 1; }
+          # Regras do _headers que casam com o mesmo caminho se somam: as do
+          # projeto continuam valendo, e esta entra junto.
+          printf '\n/*\n  X-Robots-Tag: noindex, nofollow\n' >> "$ASSETS/_headers"
+          printf 'User-agent: *\nDisallow: /\n' > "$ASSETS/robots.txt"
+
+      - name: Publicar o Worker
+        if: inputs.acao == 'publicar'
+        working-directory: ${{ inputs.caminho }}
+        run: |
+          set -euo pipefail
+          # --x-route-zones + --zone-id: a rota vai com a zona, sem o wrangler
+          # precisar listar zonas (permissao que o token nao tem).
+          npx --no-install wrangler deploy \
+            --name "$WORKER" \
+            --route "${HOST}/*" \
+            --x-route-zones --zone-id "$ZONA" \
+            --message "PR #${PR} ${COMMIT:0:7}"
+
+      - name: Conferir o endereco
+        if: inputs.acao == 'publicar'
+        run: |
+          set -euo pipefail
+          # A rota leva alguns segundos para valer na borda.
+          for tentativa in $(seq 1 12); do
+            codigo="$(curl -sS -o /dev/null -w '%{http_code}' "https://${HOST}/" || true)"
+            [ "$codigo" = 200 ] && break
+            sleep 5
+          done
+          if [ "$codigo" != 200 ]; then
+            echo "::error::https://${HOST}/ respondeu ${codigo}. Falta o registro DNS curinga *.${DOMINIO} (AAAA 100::, proxiado)?"
+            exit 1
+          fi
+          {
+            echo "### Preview do PR #${PR}"
+            echo
+            echo "https://${HOST}"
+            echo
+            echo "Worker \`${WORKER}\`, commit \`${COMMIT:0:7}\`. Some quando o PR fechar."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remover a rota e o Worker
+        if: inputs.acao == 'remover'
+        run: |
+          set -euo pipefail
+          api() { curl -sS --fail-with-body -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" "$@"; }
+          rotas="https://api.cloudflare.com/client/v4/zones/${ZONA}/workers/routes"
+          for id in $(api "$rotas" | jq -r --arg p "${HOST}/*" '.result[] | select(.pattern == $p) | .id'); do
+            api -X DELETE "${rotas}/${id}" > /dev/null
+            echo "Rota apagada: ${HOST}/*"
+          done
+          codigo="$(curl -sS -o resposta.json -w '%{http_code}' -X DELETE \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/services/${WORKER}?force=true")"
+          case "$codigo" in
+            200) echo "Worker apagado: ${WORKER}" ;;
+            404) echo "Worker ja nao existia: ${WORKER}" ;;
+            *) cat resposta.json; echo "::error::falha ao apagar o Worker ${WORKER} (HTTP ${codigo})"; exit 1 ;;
+          esac
+          echo "### Preview do PR #${PR} removido (${HOST})" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comentar no PR
+        run: |
+          set -euo pipefail
+          marca='<!-- preview-cloudflare -->'
+          id="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
+            --jq ".[] | select(.body | startswith(\"${marca}\")) | .id" | head -n 1)"
+          if [ "$ACAO" = publicar ]; then
+            corpo="$(printf '%s\n**Preview:** https://%s\n\nCommit `%s`. Atualiza a cada push e some quando o PR fechar.\n' \
+              "$marca" "$HOST" "${COMMIT:0:7}")"
+          else
+            # PR que nunca teve preview nao ganha comentario de remocao.
+            [ -n "$id" ] || exit 0
+            corpo="$(printf '%s\n**Preview removido.** O PR fechou, e https://%s deixou de existir.\n' "$marca" "$HOST")"
+          fi
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/${REPO}/issues/comments/${id}" -f body="$corpo" > /dev/null
+          else
+            gh api "repos/${REPO}/issues/${PR}/comments" -f body="$corpo" > /dev/null
+          fi

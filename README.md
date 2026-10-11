@@ -132,6 +132,51 @@ Duas coisas que valem saber:
   `qualidade` reprovou. É o comportamento desejado num ambiente de validação;
   o que continua barrando é o portão do Trivy, que vem **antes** do push.
 
+#### Site na Cloudflare: o mesmo preview, sem cluster
+
+Site publicado como Worker (`cloudflare: true`) não passa pelo ArgoCD, então
+quem cria e quem apaga o preview é a própria esteira, pelo
+[`cloudflare-preview.yml`](.github/workflows/cloudflare-preview.yml):
+
+| Evento do PR | O que acontece |
+|---|---|
+| aberto, push novo, reaberto | depois do **mesmo portão da produção**, um Worker `<repo>-pr-<N>` com a rota `pr-<N>.<domínio>/*`, marcado como "não indexar", e um comentário no PR com o link (um só, atualizado a cada push) |
+| fechado, com merge ou sem | apaga a rota e o Worker: o endereço deixa de responder. É o único job que roda no `closed` |
+
+Diferenças para o preview do cluster: vale para todo PR do próprio repositório
+(fork e Dependabot ficam de fora, porque não recebem os secrets), sem label;
+roda o build que **passou** nos testes; e é público, com `noindex`. Para
+fechar atrás de login, um app do Cloudflare Access em `pr-*.<domínio>` cobre
+todos, como no cluster.
+
+Por que **rota** e não *Custom Domain*: o Custom Domain emite um certificado
+por endereço e a Cloudflare não o apaga quando o domínio sai, um certificado
+esquecido por PR. A rota usa o certificado universal da zona, que já cobre
+`*.<domínio>`. E os *preview URLs* nativos dos Workers só existem em
+`workers.dev`.
+
+Para ligar, uma vez por site:
+
+1. no DNS da zona, um registro curinga `*` do tipo `AAAA`, conteúdo `100::`,
+   **proxiado**. É o que faz `pr-<N>.<domínio>` chegar à Cloudflare; os
+   registros do domínio e do `www` continuam valendo acima dele. Com o
+   curinga, o token da esteira não precisa de permissão de DNS;
+2. no `ci.yml` do site, `closed` nos tipos do `pull_request`,
+   `pull-requests: write` nas permissões, e os inputs:
+
+```yaml
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+# ...
+    with:
+      cloudflare: true
+      cloudflare_preview: true
+      cloudflare_preview_dominio: meusite.com
+      cloudflare_preview_zona_id: 0123456789abcdef0123456789abcdef
+      cloudflare_preview_assets: .svelte-kit/cloudflare   # o assets.directory do wrangler
+```
+
 ---
 
 ## O que veio da análise dos dois repositórios
@@ -331,7 +376,7 @@ Os secrets que ele conhece, e como cada um encontra o próprio público:
 | `SONAR_TOKEN` | quem chama o `sonar.yml` ou passa `sonar_projeto` | `GET /api/users/current` do SonarCloud |
 | `GITOPS_SSH_KEY` | quem chama o `deploy.yml` ou o `pipeline.yml` | — |
 | `GITOPS_TOKEN` | idem — **alternativa** à chave SSH, não um segundo requisito | — |
-| `CLOUDFLARE_API_TOKEN` | quem passa `cloudflare: true` ao `pipeline.yml` ou chama o `cloudflare.yml` | — (token **de conta**, modelo "Edit Cloudflare Workers") |
+| `CLOUDFLARE_API_TOKEN` | quem passa `cloudflare: true` ou `cloudflare_preview: true` ao `pipeline.yml`, ou chama o `cloudflare.yml` | — (token **de conta**, modelo "Edit Cloudflare Workers") |
 | `CLOUDFLARE_ACCOUNT_ID` | idem | — |
 | `NPM_TOKEN` | quem referencia `secrets.NPM_TOKEN` no próprio workflow | `GET /-/whoami` do registry |
 | `GH_PACKAGES_TOKEN` | quem referencia `secrets.GH_PACKAGES_TOKEN` no próprio workflow | `GET /user`, exigindo o escopo `read:packages` |
@@ -742,6 +787,7 @@ conta como memória.
 | [`build-push.yml`](.github/workflows/build-push.yml) | Imagem: constrói, varre, publica. Devolve `tag` e `digest`. |
 | [`deploy.yml`](.github/workflows/deploy.yml) | Escreve a tag e a versão no GitOps. Não toca no cluster — quem aplica é o ArgoCD. |
 | [`cloudflare.yml`](.github/workflows/cloudflare.yml) | Publica um site como Worker da Cloudflare (`wrangler deploy`), na branch de produção e só se tudo passou. Ligado por `cloudflare: true` no `pipeline.yml`. |
+| [`cloudflare-preview.yml`](.github/workflows/cloudflare-preview.yml) | Preview por PR do site na Cloudflare: publica em `pr-<N>.<domínio>` e apaga quando o PR fecha. Ligado por `cloudflare_preview: true` no `pipeline.yml`. |
 | [`versao.yml`](.github/workflows/versao.yml) | Próxima versão pelos commits. Reprova commit fora do Conventional Commits. |
 | [`lancar.yml`](.github/workflows/lancar.yml) | Alias `:<versão>` da imagem, tag, release. O último job, só na main. |
 | [`helm-lint.yml`](.github/workflows/helm-lint.yml) | Renderiza o chart com os valores reais e recusa `:latest`. |
