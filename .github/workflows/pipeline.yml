@@ -292,6 +292,31 @@ on:
         required: false
         type: string
         default: ""
+      cloudflare_preview:
+        description: >-
+          true publica cada PR em pr-<N>.<cloudflare_preview_dominio>, depois do
+          mesmo portao da producao, e apaga quando o PR fecha. Quem chama inclui
+          `closed` nos tipos do `pull_request`. Ver cloudflare-preview.yml.
+        required: false
+        type: boolean
+        default: false
+      cloudflare_preview_dominio:
+        description: "Zona do preview (seugoverno.com); precisa do DNS curinga *.<dominio>"
+        required: false
+        type: string
+        default: ""
+      cloudflare_preview_zona_id:
+        description: "Id da zona do dominio, do painel da Cloudflare"
+        required: false
+        type: string
+        default: ""
+      cloudflare_preview_assets:
+        description: >-
+          Diretorio dos arquivos estaticos do build (o `assets.directory` do
+          wrangler), para marcar o preview como "nao indexar"
+        required: false
+        type: string
+        default: ""
     outputs:
       versao:
         description: >-
@@ -337,7 +362,8 @@ permissions:
 
 jobs:
   versao:
-    if: inputs.versionar
+    # `closed` so existe para o preview_remover: PR fechado nao testa nem varre.
+    if: inputs.versionar && github.event.action != 'closed'
     permissions:
       contents: read
     uses: slipalison/github-workflows/.github/workflows/versao.yml@main
@@ -355,7 +381,7 @@ jobs:
     # run mostra os dois problemas. So o componente que carimba reprova sem
     # versao, no primeiro passo, dizendo por que.
     needs: [versao]
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && github.event.action != 'closed' }}
     uses: slipalison/github-workflows/.github/workflows/qualidade.yml@main
     with:
       componentes: ${{ inputs.componentes }}
@@ -365,7 +391,7 @@ jobs:
       GH_PACKAGES_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
 
   imagem:
-    if: inputs.imagem != ''
+    if: inputs.imagem != '' && github.event.action != 'closed'
     permissions:
       contents: read
       packages: write
@@ -382,7 +408,7 @@ jobs:
       GH_PACKAGES_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
 
   sonar:
-    if: inputs.sonar_projeto != ''
+    if: inputs.sonar_projeto != '' && github.event.action != 'closed'
     permissions:
       contents: read
     uses: slipalison/github-workflows/.github/workflows/sonar.yml@main
@@ -407,9 +433,10 @@ jobs:
     # desligado. E o UNICO jeito de este job sair `skipped` — por isso
     # `publicar` e `lancar` podem aceitar `skipped` sem abrir outra porta.
     if: >-
-      inputs.seguranca_na_main
+      github.event.action != 'closed'
+      && (inputs.seguranca_na_main
       || github.event_name != 'push'
-      || github.ref != format('refs/heads/{0}', inputs.branch_de_producao)
+      || github.ref != format('refs/heads/{0}', inputs.branch_de_producao))
     permissions:
       contents: read
       security-events: write
@@ -479,6 +506,62 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
+  preview:
+    # O preview do PR passa pelo MESMO portao da producao: o que sobe em
+    # pr-<N>.<dominio> passou nos testes e nas varreduras. Fora PR de fork e do
+    # Dependabot, que nao recebem os secrets da Cloudflare.
+    needs: [versao, qualidade, imagem, sonar, seguranca]
+    if: >-
+      always()
+      && inputs.cloudflare_preview
+      && github.event_name == 'pull_request'
+      && github.event.action != 'closed'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && github.event.pull_request.user.login != 'dependabot[bot]'
+      && (needs.versao.result == 'success' || needs.versao.result == 'skipped')
+      && needs.qualidade.result == 'success'
+      && (needs.seguranca.result == 'success' || needs.seguranca.result == 'skipped')
+      && (needs.imagem.result == 'success' || needs.imagem.result == 'skipped')
+      && (needs.sonar.result == 'success' || needs.sonar.result == 'skipped')
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: slipalison/github-workflows/.github/workflows/cloudflare-preview.yml@main
+    with:
+      acao: publicar
+      pr: ${{ github.event.pull_request.number }}
+      dominio: ${{ inputs.cloudflare_preview_dominio }}
+      zona_id: ${{ inputs.cloudflare_preview_zona_id }}
+      assets: ${{ inputs.cloudflare_preview_assets }}
+      caminho: ${{ inputs.cloudflare_caminho }}
+      versao_node: ${{ inputs.cloudflare_versao_node }}
+      comando_build: ${{ inputs.cloudflare_comando_build }}
+    secrets:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+  preview_remover:
+    # PR fechado, com merge ou sem: o endereco deixa de existir. Sem ArgoCD,
+    # quem limpa e a propria esteira — e e o unico job que roda no `closed`.
+    if: >-
+      inputs.cloudflare_preview
+      && github.event_name == 'pull_request'
+      && github.event.action == 'closed'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && github.event.pull_request.user.login != 'dependabot[bot]'
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: slipalison/github-workflows/.github/workflows/cloudflare-preview.yml@main
+    with:
+      acao: remover
+      pr: ${{ github.event.pull_request.number }}
+      dominio: ${{ inputs.cloudflare_preview_dominio }}
+      zona_id: ${{ inputs.cloudflare_preview_zona_id }}
+    secrets:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
   lancar:
     # O ultimo. Depois de todos os portoes E depois do GitOps ou da Cloudflare:
     # a tag e a prova de que o commit passou por tudo e chegou ao ar.
@@ -520,7 +603,7 @@ jobs:
   portao:
     name: Portao
     needs: [versao, qualidade, imagem, sonar, seguranca]
-    if: always()
+    if: always() && github.event.action != 'closed'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
