@@ -187,7 +187,7 @@ jobs:
         run: |
           set -euo pipefail
           # A rota leva alguns segundos para valer na borda.
-          for tentativa in $(seq 1 12); do
+          for _ in $(seq 1 12); do
             codigo="$(curl -sS -o /dev/null -w '%{http_code}' "https://${HOST}/" || true)"
             [ "$codigo" = 200 ] && break
             sleep 5
@@ -231,8 +231,9 @@ jobs:
           id="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
             --jq ".[] | select(.body | startswith(\"${marca}\")) | .id" | head -n 1)"
           if [ "$ACAO" = publicar ]; then
-            corpo="$(printf '%s\n**Preview:** https://%s\n\nCommit `%s`. Atualiza a cada push e some quando o PR fechar.\n' \
-              "$marca" "$HOST" "${COMMIT:0:7}")"
+            crase='`'
+            corpo="$(printf '%s\n**Preview:** https://%s\n\nCommit %s%s%s. Atualiza a cada push e some quando o PR fechar.\n' \
+              "$marca" "$HOST" "$crase" "${COMMIT:0:7}" "$crase")"
           else
             # PR que nunca teve preview nao ganha comentario de remocao.
             [ -n "$id" ] || exit 0
