@@ -1,0 +1,107 @@
+name: Publicar na Cloudflare (Workers)
+
+# Publica um site ou app como Cloudflare Worker, com `wrangler deploy`: o build
+# do proprio repositorio e o `wrangler.jsonc` (ou .toml) dele dizem o resto —
+# nome do Worker, assets estaticos, dominio proprio (`routes` com
+# `custom_domain: true`). Nada de configuracao do Worker mora aqui.
+#
+# Feito para o Sou Presidente (SvelteKit + adapter-cloudflare, tudo
+# pre-renderizado), mas serve a qualquer projeto node que publique com wrangler.
+#
+# CREDENCIAIS
+# -----------
+#   CLOUDFLARE_API_TOKEN   token DE CONTA (Manage account > Account API tokens),
+#                          modelo "Edit Cloudflare Workers". Token de conta nao
+#                          fica preso a um usuario: se a pessoa sair, a
+#                          publicacao continua. E o mesmo criterio da chave de
+#                          deploy do deploy.yml.
+#   CLOUDFLARE_ACCOUNT_ID  o id da conta (aparece no endereco do painel). Nao e
+#                          segredo, mas vai como secret para nao espalhar o id
+#                          em todo workflow que chama.
+#
+# O wrangler vem das devDependencies do projeto (`npx wrangler`), na versao do
+# package-lock: a mesma que o desenvolvedor usa no `npm run preview`.
+on:
+  workflow_call:
+    inputs:
+      caminho:
+        description: "Diretorio do projeto, relativo a raiz do checkout"
+        required: false
+        type: string
+        default: "."
+      versao_node:
+        description: "Versao do node; vazio = o padrao da action `preparar`"
+        required: false
+        type: string
+        default: ""
+      comando_build:
+        description: >-
+          O build antes do deploy. `--ignore-scripts` pelo mesmo motivo do
+          qualidade.yml: um pacote comprometido executa na instalacao.
+        required: false
+        type: string
+        default: "npm ci --ignore-scripts && npm run build"
+      url:
+        description: "Endereco publico, mostrado no ambiente do GitHub"
+        required: false
+        type: string
+        default: ""
+      versao:
+        description: "Versao calculada pela esteira (1.4.0), na mensagem do deploy"
+        required: false
+        type: string
+        default: ""
+    secrets:
+      CLOUDFLARE_API_TOKEN:
+        required: true
+      CLOUDFLARE_ACCOUNT_ID:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publicar:
+    name: Cloudflare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Um ambiente da o historico de publicacoes na tela do repositorio e o
+    # link do site em cada run.
+    environment:
+      name: producao
+      url: ${{ inputs.url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Preparar
+        uses: slipalison/github-workflows/.github/actions/preparar@main
+        with:
+          linguagem: node
+          versao: ${{ inputs.versao_node }}
+
+      - name: Build
+        working-directory: ${{ inputs.caminho }}
+        env:
+          COMANDO: ${{ inputs.comando_build }}
+        run: bash -euo pipefail -c "$COMANDO"
+
+      - name: Publicar
+        working-directory: ${{ inputs.caminho }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          VERSAO: ${{ inputs.versao }}
+          COMMIT: ${{ github.sha }}
+          URL_PUBLICA: ${{ inputs.url }}
+        run: |
+          set -euo pipefail
+          mensagem="${VERSAO:+v$VERSAO }${COMMIT:0:7}"
+          npx --no-install wrangler deploy --message "$mensagem"
+          {
+            echo "### Publicado na Cloudflare"
+            echo
+            echo "Versao: \`${mensagem}\`"
+            if [ -n "${URL_PUBLICA:-}" ]; then echo; echo "Site: ${URL_PUBLICA}"; fi
+          } >> "$GITHUB_STEP_SUMMARY"

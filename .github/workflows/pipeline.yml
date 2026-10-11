@@ -265,6 +265,33 @@ on:
         required: false
         type: string
         default: "main"
+
+      # ---------------------------------------------------------- cloudflare --
+      cloudflare:
+        description: >-
+          true publica na Cloudflare (Workers), com `wrangler deploy`, na branch
+          de producao e so se tudo passou. Pede os secrets CLOUDFLARE_API_TOKEN
+          e CLOUDFLARE_ACCOUNT_ID. Ver cloudflare.yml.
+        required: false
+        type: boolean
+        default: false
+      cloudflare_caminho:
+        required: false
+        type: string
+        default: "."
+      cloudflare_versao_node:
+        required: false
+        type: string
+        default: ""
+      cloudflare_comando_build:
+        required: false
+        type: string
+        default: "npm ci --ignore-scripts && npm run build"
+      cloudflare_url:
+        description: "Endereco publico do site, mostrado no ambiente do GitHub"
+        required: false
+        type: string
+        default: ""
     outputs:
       versao:
         description: >-
@@ -296,6 +323,10 @@ on:
       GITOPS_SSH_KEY:
         required: false
       GITOPS_TOKEN:
+        required: false
+      CLOUDFLARE_API_TOKEN:
+        required: false
+      CLOUDFLARE_ACCOUNT_ID:
         required: false
 
 # O minimo para todo mundo. Cada job pede o que precisa a mais — e um job que
@@ -420,11 +451,39 @@ jobs:
       GITOPS_SSH_KEY: ${{ secrets.GITOPS_SSH_KEY }}
       GITOPS_TOKEN: ${{ secrets.GITOPS_TOKEN }}
 
+  cloudflare:
+    # O mesmo portao do `publicar`, para site que vai a Cloudflare em vez do
+    # cluster: so na branch de producao, e pulado esta liberado, falho nao. A
+    # imagem pode faltar (site estatico nao tem); se existir, tem de ter passado.
+    needs: [versao, qualidade, imagem, sonar, seguranca]
+    if: >-
+      always()
+      && inputs.cloudflare
+      && github.event_name != 'pull_request'
+      && github.ref == format('refs/heads/{0}', inputs.branch_de_producao)
+      && (needs.versao.result == 'success' || needs.versao.result == 'skipped')
+      && needs.qualidade.result == 'success'
+      && (needs.seguranca.result == 'success' || needs.seguranca.result == 'skipped')
+      && (needs.imagem.result == 'success' || needs.imagem.result == 'skipped')
+      && (needs.sonar.result == 'success' || needs.sonar.result == 'skipped')
+    permissions:
+      contents: read
+    uses: slipalison/github-workflows/.github/workflows/cloudflare.yml@main
+    with:
+      caminho: ${{ inputs.cloudflare_caminho }}
+      versao_node: ${{ inputs.cloudflare_versao_node }}
+      comando_build: ${{ inputs.cloudflare_comando_build }}
+      url: ${{ inputs.cloudflare_url }}
+      versao: ${{ needs.versao.outputs.versao }}
+    secrets:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
   lancar:
-    # O ultimo. Depois de todos os portoes E depois do GitOps: a tag e a prova de
-    # que o commit passou por tudo e chegou ao cluster. `salto == nenhum` (HEAD
-    # ja tageado, run repetido) nao cria nada.
-    needs: [versao, qualidade, imagem, sonar, seguranca, publicar]
+    # O ultimo. Depois de todos os portoes E depois do GitOps ou da Cloudflare:
+    # a tag e a prova de que o commit passou por tudo e chegou ao ar.
+    # `salto == nenhum` (HEAD ja tageado, run repetido) nao cria nada.
+    needs: [versao, qualidade, imagem, sonar, seguranca, publicar, cloudflare]
     if: >-
       always()
       && inputs.versionar
@@ -437,6 +496,7 @@ jobs:
       && (needs.imagem.result == 'success' || needs.imagem.result == 'skipped')
       && (needs.sonar.result == 'success' || needs.sonar.result == 'skipped')
       && (needs.publicar.result == 'success' || needs.publicar.result == 'skipped')
+      && (needs.cloudflare.result == 'success' || needs.cloudflare.result == 'skipped')
     # `contents: write` para a tag e a release; `packages: write` para o alias da
     # imagem. Quem chama precisa conceder os dois — mesma regra do `imagem`.
     permissions:

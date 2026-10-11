@@ -331,6 +331,8 @@ Os secrets que ele conhece, e como cada um encontra o próprio público:
 | `SONAR_TOKEN` | quem chama o `sonar.yml` ou passa `sonar_projeto` | `GET /api/users/current` do SonarCloud |
 | `GITOPS_SSH_KEY` | quem chama o `deploy.yml` ou o `pipeline.yml` | — |
 | `GITOPS_TOKEN` | idem — **alternativa** à chave SSH, não um segundo requisito | — |
+| `CLOUDFLARE_API_TOKEN` | quem passa `cloudflare: true` ao `pipeline.yml` ou chama o `cloudflare.yml` | — (token **de conta**, modelo "Edit Cloudflare Workers") |
+| `CLOUDFLARE_ACCOUNT_ID` | idem | — |
 | `NPM_TOKEN` | quem referencia `secrets.NPM_TOKEN` no próprio workflow | `GET /-/whoami` do registry |
 | `GH_PACKAGES_TOKEN` | quem referencia `secrets.GH_PACKAGES_TOKEN` no próprio workflow | `GET /user`, exigindo o escopo `read:packages` |
 
@@ -739,6 +741,7 @@ conta como memória.
 | [`sonar.yml`](.github/workflows/sonar.yml) | SonarQube/Cloud com Quality Gate e o guard anti-pulo. |
 | [`build-push.yml`](.github/workflows/build-push.yml) | Imagem: constrói, varre, publica. Devolve `tag` e `digest`. |
 | [`deploy.yml`](.github/workflows/deploy.yml) | Escreve a tag e a versão no GitOps. Não toca no cluster — quem aplica é o ArgoCD. |
+| [`cloudflare.yml`](.github/workflows/cloudflare.yml) | Publica um site como Worker da Cloudflare (`wrangler deploy`), na branch de produção e só se tudo passou. Ligado por `cloudflare: true` no `pipeline.yml`. |
 | [`versao.yml`](.github/workflows/versao.yml) | Próxima versão pelos commits. Reprova commit fora do Conventional Commits. |
 | [`lancar.yml`](.github/workflows/lancar.yml) | Alias `:<versão>` da imagem, tag, release. O último job, só na main. |
 | [`helm-lint.yml`](.github/workflows/helm-lint.yml) | Renderiza o chart com os valores reais e recusa `:latest`. |
