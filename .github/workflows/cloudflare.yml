@@ -5,7 +5,7 @@ name: Publicar na Cloudflare (Workers)
 # nome do Worker, assets estaticos, dominio proprio (`routes` com
 # `custom_domain: true`). Nada de configuracao do Worker mora aqui.
 #
-# Feito para o Sou Presidente (SvelteKit + adapter-cloudflare, tudo
+# Feito para o Seu Governo (SvelteKit + adapter-cloudflare, tudo
 # pre-renderizado), mas serve a qualquer projeto node que publique com wrangler.
 #
 # CREDENCIAIS
