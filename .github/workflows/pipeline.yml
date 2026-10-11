@@ -296,7 +296,10 @@ on:
         description: >-
           true publica cada PR em pr-<N>.<cloudflare_preview_dominio>, depois do
           mesmo portao da producao, e apaga quando o PR fecha. Quem chama inclui
-          `closed` nos tipos do `pull_request`. Ver cloudflare-preview.yml.
+          `closed` nos tipos do `pull_request` e agrupa a concorrencia pelo
+          numero do PR (`github.event.pull_request.number || github.ref`): no
+          `closed` de PR mergeado o `github.ref` e a main, e o grupo por ref
+          cancelaria a publicacao da producao. Ver cloudflare-preview.yml.
         required: false
         type: boolean
         default: false

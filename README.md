@@ -161,13 +161,17 @@ Para ligar, uma vez por site:
    **proxiado**. É o que faz `pr-<N>.<domínio>` chegar à Cloudflare; os
    registros do domínio e do `www` continuam valendo acima dele. Com o
    curinga, o token da esteira não precisa de permissão de DNS;
-2. no `ci.yml` do site, `closed` nos tipos do `pull_request`,
-   `pull-requests: write` nas permissões, e os inputs:
+2. no `ci.yml` do site, `closed` nos tipos do `pull_request`, o grupo de
+   concorrência **por número do PR**, `pull-requests: write` nas permissões, e
+   os inputs:
 
 ```yaml
 on:
   pull_request:
     types: [opened, synchronize, reopened, closed]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 # ...
     with:
       cloudflare: true
@@ -176,6 +180,14 @@ on:
       cloudflare_preview_zona_id: 0123456789abcdef0123456789abcdef
       cloudflare_preview_assets: .svelte-kit/cloudflare   # o assets.directory do wrangler
 ```
+
+O grupo por número do PR não é enfeite. No `closed` de um PR **mergeado**, o
+GitHub manda `github.ref` = a branch de destino (`refs/heads/main`), e não
+`refs/pull/<N>/merge`. Com o grupo padrão (`workflow + ref`), o run que apaga
+o preview cai no mesmo grupo do push da `main` e **cancela a publicação da
+produção**. Aconteceu no primeiro merge do Seu Governo (run 38158414729:
+"Canceling since a higher priority waiting request for CI-refs/heads/main
+exists").
 
 ---
 
