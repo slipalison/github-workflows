@@ -294,29 +294,28 @@ on:
         default: ""
       cloudflare_preview:
         description: >-
-          true publica cada PR em pr-<N>.<cloudflare_preview_dominio>, depois do
-          mesmo portao da producao, e apaga quando o PR fecha. Quem chama inclui
-          `closed` nos tipos do `pull_request` e agrupa a concorrencia pelo
-          numero do PR (`github.event.pull_request.number || github.ref`): no
-          `closed` de PR mergeado o `github.ref` e a main, e o grupo por ref
-          cancelaria a publicacao da producao. Ver cloudflare-preview.yml.
+          SEM EFEITO, aceita so na transicao. O preview por PR saiu desta
+          esteira: os jobs dele pedem `pull-requests: write`, e o GitHub cobra
+          essa permissao de TODO chamador na partida do run, mesmo com o job
+          pulado — sem ela, o run morria em startup_failure, sem job nenhum
+          (basalto, PR #70). Quem quer preview chama o cloudflare-preview.yml
+          num job proprio, depois deste (ver o cabecalho dele). Estas quatro
+          entradas saem quando nenhum chamador as passar.
         required: false
         type: boolean
         default: false
       cloudflare_preview_dominio:
-        description: "Zona do preview (seugoverno.com); precisa do DNS curinga *.<dominio>"
+        description: "SEM EFEITO, aceita so na transicao (ver cloudflare_preview)"
         required: false
         type: string
         default: ""
       cloudflare_preview_zona_id:
-        description: "Id da zona do dominio, do painel da Cloudflare"
+        description: "SEM EFEITO, aceita so na transicao (ver cloudflare_preview)"
         required: false
         type: string
         default: ""
       cloudflare_preview_assets:
-        description: >-
-          Diretorio dos arquivos estaticos do build (o `assets.directory` do
-          wrangler), para marcar o preview como "nao indexar"
+        description: "SEM EFEITO, aceita so na transicao (ver cloudflare_preview)"
         required: false
         type: string
         default: ""
@@ -365,7 +364,8 @@ permissions:
 
 jobs:
   versao:
-    # `closed` so existe para o preview_remover: PR fechado nao testa nem varre.
+    # PR fechado nao testa nem varre: quem chama pode ouvir o `closed` para
+    # apagar o preview (cloudflare-preview.yml), e esta esteira nao faz nada.
     if: inputs.versionar && github.event.action != 'closed'
     permissions:
       contents: read
@@ -505,62 +505,6 @@ jobs:
       comando_build: ${{ inputs.cloudflare_comando_build }}
       url: ${{ inputs.cloudflare_url }}
       versao: ${{ needs.versao.outputs.versao }}
-    secrets:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-
-  preview:
-    # O preview do PR passa pelo MESMO portao da producao: o que sobe em
-    # pr-<N>.<dominio> passou nos testes e nas varreduras. Fora PR de fork e do
-    # Dependabot, que nao recebem os secrets da Cloudflare.
-    needs: [versao, qualidade, imagem, sonar, seguranca]
-    if: >-
-      always()
-      && inputs.cloudflare_preview
-      && github.event_name == 'pull_request'
-      && github.event.action != 'closed'
-      && github.event.pull_request.head.repo.full_name == github.repository
-      && github.event.pull_request.user.login != 'dependabot[bot]'
-      && (needs.versao.result == 'success' || needs.versao.result == 'skipped')
-      && needs.qualidade.result == 'success'
-      && (needs.seguranca.result == 'success' || needs.seguranca.result == 'skipped')
-      && (needs.imagem.result == 'success' || needs.imagem.result == 'skipped')
-      && (needs.sonar.result == 'success' || needs.sonar.result == 'skipped')
-    permissions:
-      contents: read
-      pull-requests: write
-    uses: slipalison/github-workflows/.github/workflows/cloudflare-preview.yml@main
-    with:
-      acao: publicar
-      pr: ${{ github.event.pull_request.number }}
-      dominio: ${{ inputs.cloudflare_preview_dominio }}
-      zona_id: ${{ inputs.cloudflare_preview_zona_id }}
-      assets: ${{ inputs.cloudflare_preview_assets }}
-      caminho: ${{ inputs.cloudflare_caminho }}
-      versao_node: ${{ inputs.cloudflare_versao_node }}
-      comando_build: ${{ inputs.cloudflare_comando_build }}
-    secrets:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-
-  preview_remover:
-    # PR fechado, com merge ou sem: o endereco deixa de existir. Sem ArgoCD,
-    # quem limpa e a propria esteira — e e o unico job que roda no `closed`.
-    if: >-
-      inputs.cloudflare_preview
-      && github.event_name == 'pull_request'
-      && github.event.action == 'closed'
-      && github.event.pull_request.head.repo.full_name == github.repository
-      && github.event.pull_request.user.login != 'dependabot[bot]'
-    permissions:
-      contents: read
-      pull-requests: write
-    uses: slipalison/github-workflows/.github/workflows/cloudflare-preview.yml@main
-    with:
-      acao: remover
-      pr: ${{ github.event.pull_request.number }}
-      dominio: ${{ inputs.cloudflare_preview_dominio }}
-      zona_id: ${{ inputs.cloudflare_preview_zona_id }}
     secrets:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

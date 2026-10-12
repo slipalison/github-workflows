@@ -162,8 +162,8 @@ Para ligar, uma vez por site:
    registros do domínio e do `www` continuam valendo acima dele. Com o
    curinga, o token da esteira não precisa de permissão de DNS;
 2. no `ci.yml` do site, `closed` nos tipos do `pull_request`, o grupo de
-   concorrência **por número do PR**, `pull-requests: write` nas permissões, e
-   os inputs:
+   concorrência **por número do PR**, e dois jobs **próprios**, fora da
+   chamada ao `pipeline.yml`, que chamam o `cloudflare-preview.yml`:
 
 ```yaml
 on:
@@ -172,14 +172,64 @@ on:
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
-# ...
+permissions: read-all
+jobs:
+  esteira:
+    uses: slipalison/github-workflows/.github/workflows/pipeline.yml@main
     with:
       cloudflare: true
-      cloudflare_preview: true
-      cloudflare_preview_dominio: meusite.com
-      cloudflare_preview_zona_id: 0123456789abcdef0123456789abcdef
-      cloudflare_preview_assets: .svelte-kit/cloudflare   # o assets.directory do wrangler
+      # ...
+  preview:
+    # Depois da esteira inteira verde: o mesmo portão da produção.
+    needs: esteira
+    if: >-
+      github.event_name == 'pull_request'
+      && github.event.action != 'closed'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && github.event.pull_request.user.login != 'dependabot[bot]'
+      && needs.esteira.result == 'success'
+    permissions:
+      contents: read
+      pull-requests: write   # o comentário com o link
+    uses: slipalison/github-workflows/.github/workflows/cloudflare-preview.yml@main
+    with:
+      acao: publicar
+      pr: ${{ github.event.pull_request.number }}
+      dominio: meusite.com
+      zona_id: 0123456789abcdef0123456789abcdef
+      assets: .svelte-kit/cloudflare   # o assets.directory do wrangler
+    secrets:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  preview_remover:
+    if: >-
+      github.event_name == 'pull_request'
+      && github.event.action == 'closed'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && github.event.pull_request.user.login != 'dependabot[bot]'
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: slipalison/github-workflows/.github/workflows/cloudflare-preview.yml@main
+    with:
+      acao: remover
+      pr: ${{ github.event.pull_request.number }}
+      dominio: meusite.com
+      zona_id: 0123456789abcdef0123456789abcdef
+    secrets:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 ```
+
+**Por que fora do `pipeline.yml`.** Até o PR #18 o preview era um job da
+própria esteira, ligado por `cloudflare_preview: true`. O GitHub confere, na
+partida do run, as permissões de **todos** os jobs de um workflow reutilizável
+contra o que quem chama concedeu, inclusive os que o `if` vai pular. O job de
+preview pedia `pull-requests: write`, e todo chamador que não o concedia (o
+basalto, que não tem preview) morria em `startup_failure`, sem job nenhum e
+sem log (basalto, PR #70). Com o preview num job do próprio site, só quem tem
+preview concede a permissão. As entradas `cloudflare_preview*` do
+`pipeline.yml` ainda são aceitas, **sem efeito**, até nenhum chamador as passar.
 
 O grupo por número do PR não é enfeite. No `closed` de um PR **mergeado**, o
 GitHub manda `github.ref` = a branch de destino (`refs/heads/main`), e não
@@ -388,7 +438,7 @@ Os secrets que ele conhece, e como cada um encontra o próprio público:
 | `SONAR_TOKEN` | quem chama o `sonar.yml` ou passa `sonar_projeto` | `GET /api/users/current` do SonarCloud |
 | `GITOPS_SSH_KEY` | quem chama o `deploy.yml` ou o `pipeline.yml` | — |
 | `GITOPS_TOKEN` | idem — **alternativa** à chave SSH, não um segundo requisito | — |
-| `CLOUDFLARE_API_TOKEN` | quem passa `cloudflare: true` ou `cloudflare_preview: true` ao `pipeline.yml`, ou chama o `cloudflare.yml` | — (token **de conta**, modelo "Edit Cloudflare Workers") |
+| `CLOUDFLARE_API_TOKEN` | quem passa `cloudflare: true` ao `pipeline.yml`, ou chama o `cloudflare.yml` ou o `cloudflare-preview.yml` | — (token **de conta**, modelo "Edit Cloudflare Workers") |
 | `CLOUDFLARE_ACCOUNT_ID` | idem | — |
 | `NPM_TOKEN` | quem referencia `secrets.NPM_TOKEN` no próprio workflow | `GET /-/whoami` do registry |
 | `GH_PACKAGES_TOKEN` | quem referencia `secrets.GH_PACKAGES_TOKEN` no próprio workflow | `GET /user`, exigindo o escopo `read:packages` |
@@ -799,7 +849,7 @@ conta como memória.
 | [`build-push.yml`](.github/workflows/build-push.yml) | Imagem: constrói, varre, publica. Devolve `tag` e `digest`. |
 | [`deploy.yml`](.github/workflows/deploy.yml) | Escreve a tag e a versão no GitOps. Não toca no cluster — quem aplica é o ArgoCD. |
 | [`cloudflare.yml`](.github/workflows/cloudflare.yml) | Publica um site como Worker da Cloudflare (`wrangler deploy`), na branch de produção e só se tudo passou. Ligado por `cloudflare: true` no `pipeline.yml`. |
-| [`cloudflare-preview.yml`](.github/workflows/cloudflare-preview.yml) | Preview por PR do site na Cloudflare: publica em `pr-<N>.<domínio>` e apaga quando o PR fecha. Ligado por `cloudflare_preview: true` no `pipeline.yml`. |
+| [`cloudflare-preview.yml`](.github/workflows/cloudflare-preview.yml) | Preview por PR do site na Cloudflare: publica em `pr-<N>.<domínio>` e apaga quando o PR fecha. Chamado por um job próprio do site, depois da esteira (não pelo `pipeline.yml`: ver o preview na seção da Cloudflare). |
 | [`versao.yml`](.github/workflows/versao.yml) | Próxima versão pelos commits. Reprova commit fora do Conventional Commits. |
 | [`lancar.yml`](.github/workflows/lancar.yml) | Alias `:<versão>` da imagem, tag, release. O último job, só na main. |
 | [`helm-lint.yml`](.github/workflows/helm-lint.yml) | Renderiza o chart com os valores reais e recusa `:latest`. |
