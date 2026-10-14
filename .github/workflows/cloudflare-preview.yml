@@ -40,6 +40,17 @@ name: Preview na Cloudflare (por PR)
 # O prefixo `pr-` e o mesmo do basalto: uma regra so (Cloudflare Access em
 # pr-*.<dominio>, por exemplo) cobre todos os previews, se um dia precisar.
 #
+# ATRAS DO CLOUDFLARE ACCESS
+# --------------------------
+# Numa zona em que um app do Access ja cobre pr-*.<dominio> (em
+# alisonamorim.com, o app dos previews do cluster, pr-<N>-<app>), o preview
+# herda o login: o Access roda na borda antes da rota do Worker, e sem login a
+# resposta e um 302 para <equipe>.cloudflareaccess.com. Com
+# `atras_do_access: true` a conferencia espera esse 302 e confere pela API que
+# a rota pr-<N>.<dominio>/* aponta para o Worker do PR, ja que o conteudo so
+# abre logado. O preview fica privado, sem mexer no Zero Trust. A rota casa so
+# o host exato, entao os previews do cluster continuam indo para o tunel.
+#
 # CREDENCIAIS: os mesmos CLOUDFLARE_API_TOKEN e CLOUDFLARE_ACCOUNT_ID do
 # cloudflare.yml, sem permissao a mais. PR de fork e do Dependabot nao recebem
 # secrets; o pipeline.yml pula o preview neles.
@@ -77,6 +88,14 @@ on:
         required: false
         type: string
         default: ""
+      atras_do_access:
+        description: >-
+          true quando pr-<N>.<dominio> cai num app do Cloudflare Access (um
+          app em pr-*.<dominio>). A conferencia espera o 302 para o login e
+          confere a rota pela API, em vez de esperar 200.
+        required: false
+        type: boolean
+        default: false
       caminho:
         required: false
         type: string
@@ -116,6 +135,7 @@ jobs:
       PR: ${{ inputs.pr }}
       DOMINIO: ${{ inputs.dominio }}
       ZONA: ${{ inputs.zona_id }}
+      ATRAS_DO_ACCESS: ${{ inputs.atras_do_access }}
       NOME_BASE: ${{ inputs.nome != '' && inputs.nome || github.event.repository.name }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -186,22 +206,47 @@ jobs:
         if: inputs.acao == 'publicar'
         run: |
           set -euo pipefail
-          # A rota leva alguns segundos para valer na borda.
-          for _ in $(seq 1 12); do
-            codigo="$(curl -sS -o /dev/null -w '%{http_code}' "https://${HOST}/" || true)"
-            [ "$codigo" = 200 ] && break
-            sleep 5
-          done
-          if [ "$codigo" != 200 ]; then
-            echo "::error::https://${HOST}/ respondeu ${codigo}. Falta o registro DNS curinga *.${DOMINIO} (AAAA 100::, proxiado)?"
-            exit 1
+          aviso=""
+          if [ "$ATRAS_DO_ACCESS" = true ]; then
+            # Sem login, o Access responde 302 para a tela dele, com o host do
+            # preview no caminho. Quem atende depois do login e a rota, e essa
+            # se confere pela API.
+            esperado="^302 https://[a-z0-9-]+\.cloudflareaccess\.com/cdn-cgi/access/login/${HOST//./\\.}([?/]|$)"
+            for _ in $(seq 1 12); do
+              veio="$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' "https://${HOST}/" || true)"
+              [[ "$veio" =~ $esperado ]] && break
+              sleep 5
+            done
+            if [[ ! "$veio" =~ $esperado ]]; then
+              echo "::error::https://${HOST}/ respondeu ${veio%% *}, e nao o 302 para o login do Access. Ha um app do Access cobrindo ${HOST}?"
+              exit 1
+            fi
+            worker_da_rota="$(curl -sS --fail-with-body -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+              "https://api.cloudflare.com/client/v4/zones/${ZONA}/workers/routes" \
+              | jq -r --arg p "${HOST}/*" '[.result[] | select(.pattern == $p) | .script] | first // ""')"
+            if [ "$worker_da_rota" != "$WORKER" ]; then
+              echo "::error::a rota ${HOST}/* aponta para '${worker_da_rota}', e nao para ${WORKER}"
+              exit 1
+            fi
+            aviso=" Atras do Cloudflare Access: abre com o login."
+          else
+            # A rota leva alguns segundos para valer na borda.
+            for _ in $(seq 1 12); do
+              codigo="$(curl -sS -o /dev/null -w '%{http_code}' "https://${HOST}/" || true)"
+              [ "$codigo" = 200 ] && break
+              sleep 5
+            done
+            if [ "$codigo" != 200 ]; then
+              echo "::error::https://${HOST}/ respondeu ${codigo}. Falta o registro DNS curinga *.${DOMINIO} (AAAA 100::, proxiado)?"
+              exit 1
+            fi
           fi
           {
             echo "### Preview do PR #${PR}"
             echo
             echo "https://${HOST}"
             echo
-            echo "Worker \`${WORKER}\`, commit \`${COMMIT:0:7}\`. Some quando o PR fechar."
+            echo "Worker \`${WORKER}\`, commit \`${COMMIT:0:7}\`. Some quando o PR fechar.${aviso}"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Remover a rota e o Worker
@@ -232,8 +277,10 @@ jobs:
             --jq ".[] | select(.body | startswith(\"${marca}\")) | .id" | head -n 1)"
           if [ "$ACAO" = publicar ]; then
             crase='`'
-            corpo="$(printf '%s\n**Preview:** https://%s\n\nCommit %s%s%s. Atualiza a cada push e some quando o PR fechar.\n' \
-              "$marca" "$HOST" "$crase" "${COMMIT:0:7}" "$crase")"
+            aviso=""
+            [ "$ATRAS_DO_ACCESS" = true ] && aviso=" Abre com o login do Cloudflare Access."
+            corpo="$(printf '%s\n**Preview:** https://%s\n\nCommit %s%s%s. Atualiza a cada push e some quando o PR fechar.%s\n' \
+              "$marca" "$HOST" "$crase" "${COMMIT:0:7}" "$crase" "$aviso")"
           else
             # PR que nunca teve preview nao ganha comentario de remocao.
             [ -n "$id" ] || exit 0

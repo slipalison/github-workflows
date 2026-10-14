@@ -149,6 +149,13 @@ roda o build que **passou** nos testes; e é público, com `noindex`. Para
 fechar atrás de login, um app do Cloudflare Access em `pr-*.<domínio>` cobre
 todos, como no cluster.
 
+Quando a zona já tem esse app, passe `atras_do_access: true`. É o caso de
+`alisonamorim.com`, que usa o app dos previews do cluster. Sem login, o Access
+responde 302 para a tela dele antes de a rota do Worker entrar. Por isso a
+conferência espera esse 302 e confere pela API que a rota `pr-<N>.<domínio>/*`
+aponta para o Worker do PR, em vez de esperar 200. O link no PR avisa que abre
+com o login.
+
 Por que **rota** e não *Custom Domain*: o Custom Domain emite um certificado
 por endereço e a Cloudflare não o apaga quando o domínio sai, um certificado
 esquecido por PR. A rota usa o certificado universal da zona, que já cobre
@@ -160,7 +167,9 @@ Para ligar, uma vez por site:
 1. no DNS da zona, um registro curinga `*` do tipo `AAAA`, conteúdo `100::`,
    **proxiado**. É o que faz `pr-<N>.<domínio>` chegar à Cloudflare; os
    registros do domínio e do `www` continuam valendo acima dele. Com o
-   curinga, o token da esteira não precisa de permissão de DNS;
+   curinga, o token da esteira não precisa de permissão de DNS. Um curinga
+   proxiado que já existe, como o de um túnel, serve: a rota do Worker atende
+   antes da origem;
 2. no `ci.yml` do site, `closed` nos tipos do `pull_request`, o grupo de
    concorrência **por número do PR**, e dois jobs **próprios**, fora da
    chamada ao `pipeline.yml`, que chamam o `cloudflare-preview.yml`:
