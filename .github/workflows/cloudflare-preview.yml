@@ -44,16 +44,21 @@ name: Preview na Cloudflare (por PR)
 # --------------------------
 # Numa zona em que um app do Access ja cobre pr-*.<dominio> (em
 # alisonamorim.com, o app dos previews do cluster, pr-<N>-<app>), o preview
-# herda o login: o Access roda na borda antes da rota do Worker, e sem login a
-# resposta e um 302 para <equipe>.cloudflareaccess.com. Com
-# `atras_do_access: true` a conferencia espera esse 302 e confere pela API que
-# a rota pr-<N>.<dominio>/* aponta para o Worker do PR, ja que o conteudo so
-# abre logado. O preview fica privado, sem mexer no Zero Trust. A rota casa so
-# o host exato, entao os previews do cluster continuam indo para o tunel.
+# herda o login: o Access roda na borda antes da rota do Worker. O preview fica
+# privado, sem mexer no Zero Trust. A rota casa so o host exato, entao os
+# previews do cluster continuam indo para o tunel.
+#
+# Com `atras_do_access: true` a conferencia e pela API, e nao por um pedido
+# HTTP: numa zona com Bot Fight Mode, o IP de datacenter do runner leva o
+# desafio (403) antes de chegar ao Access, e no plano Free nenhuma regra o
+# isenta. A API confirma que um app do Access cobre o host inteiro, sem
+# politica "bypass", e que a rota aponta para o Worker do PR. O pedido HTTP
+# fica so como alarme: 200 sem login e preview aberto, e reprova.
 #
 # CREDENCIAIS: os mesmos CLOUDFLARE_API_TOKEN e CLOUDFLARE_ACCOUNT_ID do
-# cloudflare.yml, sem permissao a mais. PR de fork e do Dependabot nao recebem
-# secrets; o pipeline.yml pula o preview neles.
+# cloudflare.yml. Com `atras_do_access: true`, o token precisa tambem de
+# Account > Access: Apps and Policies > Read. PR de fork e do Dependabot nao
+# recebem secrets; o pipeline.yml pula o preview neles.
 on:
   workflow_call:
     inputs:
@@ -91,8 +96,8 @@ on:
       atras_do_access:
         description: >-
           true quando pr-<N>.<dominio> cai num app do Cloudflare Access (um
-          app em pr-*.<dominio>). A conferencia espera o 302 para o login e
-          confere a rota pela API, em vez de esperar 200.
+          app em pr-*.<dominio>). A conferencia confere o app e a rota pela
+          API, em vez de esperar 200; o token precisa de leitura do Access.
         required: false
         type: boolean
         default: false
@@ -208,26 +213,53 @@ jobs:
           set -euo pipefail
           aviso=""
           if [ "$ATRAS_DO_ACCESS" = true ]; then
-            # Sem login, o Access responde 302 para a tela dele, com o host do
-            # preview no caminho. Quem atende depois do login e a rota, e essa
-            # se confere pela API.
-            esperado="^302 https://[a-z0-9-]+\.cloudflareaccess\.com/cdn-cgi/access/login/${HOST//./\\.}([?/]|$)"
-            for _ in $(seq 1 12); do
-              veio="$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' "https://${HOST}/" || true)"
-              [[ "$veio" =~ $esperado ]] && break
-              sleep 5
+            api() { curl -sS --fail-with-body -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" "$@"; }
+            # 1) Um app do Access cobre o host inteiro? Vale o dominio do app
+            # sem caminho (ou com /*), com o * casando um nivel, como no Access.
+            apps='[]'
+            pagina=1
+            while :; do
+              if ! resposta="$(api "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/access/apps?per_page=100&page=${pagina}")"; then
+                echo "::error::a API do Access recusou: $(jq -r '[.errors[]?.message] | join("; ")' <<<"$resposta" 2>/dev/null). O token precisa de Account > Access: Apps and Policies > Read."
+                exit 1
+              fi
+              apps="$(jq -c --argjson a "$apps" '$a + .result' <<<"$resposta")"
+              [ "$pagina" -lt "$(jq -r '.result_info.total_pages // 1' <<<"$resposta")" ] || break
+              pagina=$((pagina + 1))
             done
-            if [[ ! "$veio" =~ $esperado ]]; then
-              echo "::error::https://${HOST}/ respondeu ${veio%% *}, e nao o 302 para o login do Access. Ha um app do Access cobrindo ${HOST}?"
+            cobrem="$(jq -r --arg h "$HOST" '
+              def cobre: (split("/")) as $p
+                | ($p[1:] | join("/")) as $caminho
+                | ($caminho == "" or $caminho == "*")
+                  and ($h | test("^" + ($p[0] | ascii_downcase | gsub("\\."; "\\.") | gsub("\\*"; "[^.]*")) + "$"));
+              .[]
+              | select([(.domain // empty), (.self_hosted_domains // [])[],
+                        ((.destinations // [])[] | select(.type == "public") | .uri)] | any(cobre))
+              | [.name, ([.policies[]? | select(.decision == "bypass")] | length)] | @tsv' <<<"$apps")"
+            if [ -z "$cobrem" ]; then
+              echo "::error::nenhum app do Cloudflare Access cobre ${HOST}. Crie um app em pr-*.${DOMINIO} ou tire o atras_do_access."
               exit 1
             fi
-            worker_da_rota="$(curl -sS --fail-with-body -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-              "https://api.cloudflare.com/client/v4/zones/${ZONA}/workers/routes" \
+            if awk -F'\t' '$2 > 0 { achou = 1 } END { exit !achou }' <<<"$cobrem"; then
+              echo "::error::um app do Access em ${HOST} tem politica bypass, que abre sem login: $(cut -f1 <<<"$cobrem" | paste -sd, -)"
+              exit 1
+            fi
+            echo "Access em ${HOST}: $(cut -f1 <<<"$cobrem" | paste -sd, -)"
+            # 2) A rota aponta para o Worker deste PR?
+            worker_da_rota="$(api "https://api.cloudflare.com/client/v4/zones/${ZONA}/workers/routes" \
               | jq -r --arg p "${HOST}/*" '[.result[] | select(.pattern == $p) | .script] | first // ""')"
             if [ "$worker_da_rota" != "$WORKER" ]; then
               echo "::error::a rota ${HOST}/* aponta para '${worker_da_rota}', e nao para ${WORKER}"
               exit 1
             fi
+            # 3) Alarme: 200 sem login e o preview aberto. Qualquer outra
+            # resposta (302 do Access, 403 do desafio) segue.
+            codigo="$(curl -sS -o /dev/null -w '%{http_code}' "https://${HOST}/" || true)"
+            if [ "$codigo" = 200 ]; then
+              echo "::error::https://${HOST}/ respondeu 200 sem login: o Access nao esta valendo"
+              exit 1
+            fi
+            echo "Sem login, https://${HOST}/ respondeu ${codigo}."
             aviso=" Atras do Cloudflare Access: abre com o login."
           else
             # A rota leva alguns segundos para valer na borda.

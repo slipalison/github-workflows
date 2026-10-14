@@ -150,11 +150,14 @@ fechar atrás de login, um app do Cloudflare Access em `pr-*.<domínio>` cobre
 todos, como no cluster.
 
 Quando a zona já tem esse app, passe `atras_do_access: true`. É o caso de
-`alisonamorim.com`, que usa o app dos previews do cluster. Sem login, o Access
-responde 302 para a tela dele antes de a rota do Worker entrar. Por isso a
-conferência espera esse 302 e confere pela API que a rota `pr-<N>.<domínio>/*`
-aponta para o Worker do PR, em vez de esperar 200. O link no PR avisa que abre
-com o login.
+`alisonamorim.com`, que usa o app dos previews do cluster. A conferência passa
+a ser pela API, e não por um pedido HTTP: numa zona com Bot Fight Mode, o IP de
+datacenter do runner leva desafio (403) antes de chegar ao Access, e no plano
+Free nenhuma regra o isenta. A API confirma que um app do Access cobre o host
+inteiro, sem política *bypass*, e que a rota `pr-<N>.<domínio>/*` aponta para o
+Worker do PR. O pedido HTTP fica só como alarme: 200 sem login reprova. O token
+precisa também de **Account › Access: Apps and Policies › Read**. O link no PR
+avisa que abre com o login.
 
 Por que **rota** e não *Custom Domain*: o Custom Domain emite um certificado
 por endereço e a Cloudflare não o apaga quando o domínio sai, um certificado
