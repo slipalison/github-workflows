@@ -159,6 +159,13 @@ Worker do PR. O pedido HTTP fica só como alarme: 200 sem login reprova. O token
 precisa também de **Account › Access: Apps and Policies › Read**. O link no PR
 avisa que abre com o login.
 
+Dois repositórios publicando na mesma zona (o site e o blog, ambos em
+`alisonamorim.com`) disputariam o mesmo `pr-<N>.<domínio>`: o número do PR é de
+cada repositório. Passe `sufixo` num deles: com `sufixo: '-blog'`, o preview
+vira `pr-<N>-blog.<domínio>`, o mesmo formato `pr-<N>-<app>` dos previews do
+cluster. Fica um nível abaixo da zona (o certificado universal cobre) e casa
+`pr-*.<domínio>` (o mesmo app do Access). Sem `sufixo`, nada muda.
+
 Por que **rota** e não *Custom Domain*: o Custom Domain emite um certificado
 por endereço e a Cloudflare não o apaga quando o domínio sai, um certificado
 esquecido por PR. A rota usa o certificado universal da zona, que já cobre
