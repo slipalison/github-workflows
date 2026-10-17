@@ -1,6 +1,7 @@
 name: Preview na Cloudflare (por PR)
 
-# Publica cada pull request num endereco proprio, pr-<N>.<dominio>, e apaga
+# Publica cada pull request num endereco proprio, pr-<N>.<dominio> (ou
+# pr-<N><sufixo>.<dominio>, ver "Dois repositorios na mesma zona"), e apaga
 # tudo quando o PR fecha, com merge ou sem. E o preview do basalto sem ArgoCD:
 # la, uma ApplicationSet cria e destroi o ambiente; aqui, um Worker por PR,
 # criado por este workflow e apagado por ele mesmo quando o PR fecha.
@@ -40,6 +41,15 @@ name: Preview na Cloudflare (por PR)
 # O prefixo `pr-` e o mesmo do basalto: uma regra so (Cloudflare Access em
 # pr-*.<dominio>, por exemplo) cobre todos os previews, se um dia precisar.
 #
+# DOIS REPOSITORIOS NA MESMA ZONA
+# -------------------------------
+# O numero do PR e de cada repositorio: o PR 5 do site e o PR 5 do blog, ambos
+# em alisonamorim.com, cairiam no mesmo pr-5.alisonamorim.com, e um preview
+# sobrescreveria a rota do outro. `sufixo` separa: com '-blog', o preview vira
+# pr-<N>-blog.<dominio>, o mesmo formato pr-<N>-<app> dos previews do cluster.
+# Continua um nivel abaixo da zona (o certificado universal cobre) e continua
+# casando pr-*.<dominio> (o app do Access e o mesmo). Vazio, nada muda.
+#
 # ATRAS DO CLOUDFLARE ACCESS
 # --------------------------
 # Numa zona em que um app do Access ja cobre pr-*.<dominio> (em
@@ -71,7 +81,7 @@ on:
         required: true
         type: number
       dominio:
-        description: "A zona na Cloudflare (seugoverno.com); o preview vira pr-<N>.<dominio>"
+        description: "A zona na Cloudflare (seugoverno.com); o preview vira pr-<N><sufixo>.<dominio>"
         required: true
         type: string
       zona_id:
@@ -82,6 +92,14 @@ on:
         type: string
       nome:
         description: "Prefixo do Worker; vazio = o nome do repositorio. O Worker e <nome>-pr-<N>"
+        required: false
+        type: string
+        default: ""
+      sufixo:
+        description: >-
+          Vai depois do numero no endereco: o preview vira pr-<N><sufixo>.<dominio>.
+          Para dois repositorios na mesma zona nao disputarem pr-<N>: '-blog' da
+          pr-<N>-blog.<dominio>. Vazio = pr-<N>.<dominio>.
         required: false
         type: string
         default: ""
@@ -140,6 +158,7 @@ jobs:
       PR: ${{ inputs.pr }}
       DOMINIO: ${{ inputs.dominio }}
       ZONA: ${{ inputs.zona_id }}
+      SUFIXO: ${{ inputs.sufixo }}
       ATRAS_DO_ACCESS: ${{ inputs.atras_do_access }}
       NOME_BASE: ${{ inputs.nome != '' && inputs.nome || github.event.repository.name }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -157,8 +176,13 @@ jobs:
           [[ "$ZONA" =~ ^[0-9a-f]{32}$ ]] || { echo "::error::zona_id invalido"; exit 1; }
           nome="$(printf '%s' "$NOME_BASE" | tr '[:upper:]_.' '[:lower:]--')-pr-${PR}"
           [[ "$nome" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || { echo "::error::nome de Worker invalido: '$nome'"; exit 1; }
+          # O sufixo fica no MESMO nivel do pr-<N> (sem ponto): um nivel a mais
+          # sairia do certificado universal da zona.
+          [[ "$SUFIXO" =~ ^(-[a-z0-9]+)*$ ]] || { echo "::error::sufixo invalido: '$SUFIXO' (ex.: -blog)"; exit 1; }
+          rotulo="pr-${PR}${SUFIXO}"
+          [ "${#rotulo}" -le 63 ] || { echo "::error::endereco longo demais: '$rotulo'"; exit 1; }
           {
-            echo "HOST=pr-${PR}.${DOMINIO}"
+            echo "HOST=${rotulo}.${DOMINIO}"
             echo "WORKER=${nome}"
           } >> "$GITHUB_ENV"
 
