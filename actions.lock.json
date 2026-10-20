@@ -106,6 +106,10 @@
     "azure/setup-helm": {
       "versao": "v5.0.1",
       "sha": "9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310"
+    },
+    "tailscale/github-action": {
+      "versao": "v4.2.0",
+      "sha": "d1b6cd204f8dceda5b3eaad7f1f767be390056cd"
     }
   }
 }
