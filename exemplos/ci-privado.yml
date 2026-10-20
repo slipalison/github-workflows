@@ -7,10 +7,11 @@
 #      derrubando o run. Perde-se a aba, nao a verificacao.
 #
 #   2. SonarQube Cloud e gratuito so para projeto publico (o Free aceita 50 mil
-#      linhas privadas e so analisa a main). `sonar_host` aponta para a
-#      instancia do homelab, num endereco que so a tailnet alcanca: o job do
-#      Sonar entra nela como no efemero, com TS_OAUTH_CLIENT_ID e
-#      TS_OAUTH_SECRET, e la a analise vale para branch e PR, nao so a main.
+#      linhas privadas, e analisa so a main e os PRs). A esteira ve que o
+#      repositorio e privado e manda a analise para a instancia do homelab,
+#      num endereco que so a tailnet alcanca: o job do Sonar entra nela como
+#      no efemero, e la qualquer branch tambem e analisada. Daqui saem so os
+#      dois secrets do Tailscale, TS_OAUTH_CLIENT_ID e TS_OAUTH_SECRET.
 #      Sem instancia nenhuma, o honesto e `sonar_dispensa` com o motivo — que
 #      deixa o pulo VISIVEL no arquivo, em vez de um job verde que nao analisou
 #      nada.
@@ -44,7 +45,6 @@ jobs:
       # Na instancia propria a chave do projeto e livre: sem o prefixo
       # `slipalison_` que o SonarCloud exige pela organizacao.
       sonar_projeto: investment-portfolio-balancer
-      sonar_host: http://10.10.0.13:30900
       sonar_linguagem: node
     secrets:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
