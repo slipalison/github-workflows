@@ -372,7 +372,7 @@ licença.
 
 | | Público | Privado |
 |---|---|---|
-| **Sonar** | SonarQube Cloud, gratuito | Cloud é pago → `sonar_host` aponta para a instância do homelab, pela tailnet |
+| **Sonar** | SonarQube Cloud, gratuito | Cloud é pago → a esteira manda para a instância do homelab sozinha, pela tailnet |
 | **SARIF na aba Security** | gratuito | exige GitHub Advanced Security (pago) |
 | **CodeQL** | gratuito | idem |
 
@@ -391,11 +391,21 @@ Desde 2026-10-20 a instância própria existe: SonarQube Community Build 26.5 co
 o plugin de branches, no cluster de casa (`homelab-gitops`,
 `platform/sonarqube/`). Lá a análise vale para **branch e PR**, não só para a
 main, e não há teto de linhas. O endereço é de rede privada
-(`http://10.10.0.13:30900`), então o job do Sonar entra na tailnet do dono:
+(`http://10.10.0.13:30900`), então o job do Sonar entra na tailnet do dono.
+
+O repositório não escreve esse endereço. O `pipeline.yml` escolhe o host pela
+visibilidade, como o `publicar_sarif: auto`: privado vai para o homelab,
+público para a Cloud. `sonar_host` com valor vence a escolha. Ligar o Sonar num
+repositório privado é, então, `sonar_projeto` com o que analisar, e passar
+`TS_OAUTH_CLIENT_ID` e `TS_OAUTH_SECRET` em `secrets:`. Essas duas linhas não
+têm como sair do repositório: um workflow reutilizável só recebe o secret que
+quem chama passa por nome (ou todos, com `secrets: inherit`), e conta pessoal
+não tem secret de Actions compartilhado (ver `bin/semear_secret.py`).
 
 | Peça | Onde |
 |---|---|
-| `sonar_host` de faixa privada liga a tailnet | `sonar.yml`, passo "Cloud ou Server?" |
+| Repositório privado vai para o homelab | `pipeline.yml`, job `sonar` |
+| Host de faixa privada liga a tailnet | `sonar.yml`, passo "Cloud ou Server?" |
 | Nó efêmero com `tag:ci-sonar` | `tailscale/github-action`, versão e sha256 do binário fixos |
 | O que a tag alcança: só `10.10.0.13:30900` | ACL da tailnet, com testes que recusam salvar se ela alcançar mais |
 | Credencial | OAuth client do Tailscale: `TS_OAUTH_CLIENT_ID` e `TS_OAUTH_SECRET`, gravados pelo `semear_secret.py` |

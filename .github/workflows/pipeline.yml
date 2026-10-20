@@ -184,9 +184,13 @@ on:
         type: string
         default: "slipalison"
       sonar_host:
+        description: >-
+          Vazio escolhe pela visibilidade do repositorio: privado vai para o
+          SonarQube do homelab, publico para o SonarQube Cloud (ver o job
+          `sonar`). Um valor aqui vence a escolha.
         required: false
         type: string
-        default: "https://sonarcloud.io"
+        default: ""
       sonar_modo:
         required: false
         type: string
@@ -349,9 +353,10 @@ on:
         required: false
       TS_OAUTH_CLIENT_ID:
         description: >-
-          OAuth client do Tailscale, para `sonar_host` de faixa privada (a
-          instancia do homelab): o job do Sonar entra na tailnet como no
-          efemero. Ver o sonar.yml, "A INSTANCIA DO HOMELAB".
+          OAuth client do Tailscale, para repositorio privado (ou `sonar_host`
+          de faixa privada): a instancia do homelab so se alcanca pela tailnet,
+          e o job do Sonar entra nela como no efemero. Ver o sonar.yml, "A
+          INSTANCIA DO HOMELAB".
         required: false
       TS_OAUTH_SECRET:
         required: false
@@ -426,7 +431,17 @@ jobs:
     with:
       projeto: ${{ inputs.sonar_projeto }}
       organizacao: ${{ inputs.sonar_organizacao }}
-      host: ${{ inputs.sonar_host }}
+      # Privado vai para o homelab, publico para a Cloud, e quem decide e a
+      # visibilidade, como no `publicar_sarif: auto`: a Cloud gratuita trava
+      # em 50 mil linhas privadas, e o homelab so atende pela tailnet. O
+      # endereco mora aqui, e nao em cada repositorio, para mudar num lugar so.
+      # `toJSON(...) == 'false'` e nao `!private`: evento sem `repository` no
+      # payload da null, e null conta como privado, como no build-push.yml --
+      # o lado que nao manda codigo privado para fora de casa.
+      host: >-
+        ${{ inputs.sonar_host != '' && inputs.sonar_host
+        || (toJSON(github.event.repository.private) == 'false' && 'https://sonarcloud.io'
+        || 'http://10.10.0.13:30900') }}
       modo: ${{ inputs.sonar_modo }}
       linguagem: ${{ inputs.sonar_linguagem }}
       versao_linguagem: ${{ inputs.sonar_versao_linguagem }}
