@@ -323,6 +323,7 @@ jobs:
           PROJETO: ${{ inputs.projeto }}
           HOST: ${{ inputs.host }}
           ORGANIZACAO: ${{ inputs.organizacao }}
+          CLOUD: ${{ steps.destino.outputs.cloud }}
           PR_NUMERO: ${{ github.event.pull_request.number }}
           PR_BRANCH: ${{ github.event.pull_request.head.ref }}
           PR_BASE: ${{ github.event.pull_request.base.ref }}
@@ -337,7 +338,10 @@ jobs:
                 # the C# plugin" e sai 1 sem sequer consultar o portao — o que
                 # parece reprovacao e nao e.
                 /d:sonar.qualitygate.wait=true)
-          if [ -n "$ORGANIZACAO" ]; then
+          # Organizacao e coisa da Cloud. O `sonar_organizacao` do pipeline.yml
+          # tem `slipalison` de padrao, e um repositorio que so troca o
+          # `sonar_host` para a instancia propria a mandaria para o servidor.
+          if [ -n "$ORGANIZACAO" ] && [ "$CLOUD" = "true" ]; then
             args+=(/o:"$ORGANIZACAO")
           fi
           if [ -n "$PR_NUMERO" ]; then
@@ -380,7 +384,8 @@ jobs:
           # arquivo aparece inteiro no log e da para reproduzir na mao.
           {
             echo "sonar.projectKey=$PROJETO"
-            if [ -n "$ORGANIZACAO" ]; then
+            # So na Cloud, pelo mesmo motivo do `begin` do modo dotnet.
+            if [ -n "$ORGANIZACAO" ] && [ "${{ steps.destino.outputs.cloud }}" = "true" ]; then
               echo "sonar.organization=$ORGANIZACAO"
             fi
             # Na Cloud, quem resolve o endereco e o proprio scanner a partir da
