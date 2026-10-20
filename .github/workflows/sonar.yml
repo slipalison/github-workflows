@@ -23,9 +23,29 @@ name: Sonar
 # -----------------
 # SonarQube Cloud e gratuito para projeto publico e pago para privado. Por isso
 # `host` e entrada: repositorio privado aponta para uma instancia propria de
-# SonarQube (a do homelab, quando existir) sem mudar mais nada aqui. O que NAO
-# se faz e deixar privado sem analise nenhuma e fingir que o portao existe —
-# para isso ha `exigir_token: false`, que e explicito e aparece no diff.
+# SonarQube sem mudar mais nada aqui. O que NAO se faz e deixar privado sem
+# analise nenhuma e fingir que o portao existe — para isso ha
+# `exigir_token: false`, que e explicito e aparece no diff.
+#
+# A INSTANCIA DO HOMELAB ESTA NUMA REDE PRIVADA
+# ---------------------------------------------
+# Desde 2026-10-20 ela existe (homelab-gitops, platform/sonarqube/), num
+# endereco 10.x que so a tailnet do dono alcanca. Um `host` de faixa privada
+# faz este job entrar na tailnet como no EFEMERO, com a `tailscale_tag`, e a
+# ACL da tailnet deixa essa tag alcancar so a porta do SonarQube. Por que nao
+# pelo tunel da Cloudflare, como os paineis: o Bot Fight Mode desafia o IP de
+# datacenter do runner antes do Access (o cloudflare-preview.yml ja mediu
+# isso), e o scanner nao sabe mandar os cabecalhos do token de servico.
+#
+# A entrada e o mais TARDE possivel: depois dos testes no modo generico, que e
+# onde o codigo do PR roda. No modo dotnet ela vem antes do `begin`, porque o
+# `begin` ja baixa as regras do servidor.
+#
+# Credencial: OAuth client do Tailscale (TS_OAUTH_CLIENT_ID e TS_OAUTH_SECRET),
+# e nao federacao de identidade. A federacao pede `id-token: write`, e o GitHub
+# confere permissao de workflow chamado de forma ESTATICA: todo repositorio que
+# chama o pipeline.yml sem conceder `id-token` deixaria de partir, inclusive os
+# publicos, que nem usam a tailnet.
 
 on:
   workflow_call:
@@ -86,6 +106,14 @@ on:
         required: false
         type: boolean
         default: true
+      tailscale_tag:
+        description: >-
+          Tag com que o runner entra na tailnet quando `host` e de faixa
+          privada. O OAuth client precisa ter exatamente esta tag, e a ACL da
+          tailnet e quem decide o que ela alcanca.
+        required: false
+        type: string
+        default: "tag:ci-sonar"
       pacotes_sistema:
         description: >-
           Pacotes apt, separados por espaco, instalados antes dos testes e da
@@ -106,6 +134,13 @@ on:
           tolera a variavel ausente no `.npmrc` (medido no npm 11). Opcional.
         required: false
       SONAR_TOKEN:
+        required: false
+      TS_OAUTH_CLIENT_ID:
+        description: >-
+          OAuth client do Tailscale (escopo auth_keys, com a `tailscale_tag`).
+          So para `host` de faixa privada; sem ele, nesse caso, o job falha.
+        required: false
+      TS_OAUTH_SECRET:
         required: false
 
 permissions:
@@ -171,6 +206,32 @@ jobs:
             *sonarcloud.io*|*sonarqube.com*) echo "cloud=true"  >> "$GITHUB_OUTPUT" ;;
             *)                               echo "cloud=false" >> "$GITHUB_OUTPUT" ;;
           esac
+          # Endereco de faixa privada (RFC 1918 ou o CGNAT da tailnet): so se
+          # chega pela tailnet. Nome de host nao entra aqui de proposito — um
+          # nome resolve para onde o DNS quiser, e o caminho tem de ser o mesmo
+          # que a ACL autoriza.
+          re_privado='^https?://(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.)'
+          if [[ $HOST =~ $re_privado ]]; then
+            echo "tailnet=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "tailnet=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Mesma regra do token, um passo abaixo: `host` privado sem credencial da
+      # tailnet nao chegaria ao servidor, e o erro apareceria la no scanner
+      # como "connection timed out", que manda olhar a rede e nao o secret.
+      - name: Conferir a credencial da tailnet
+        if: env.SONAR_TOKEN != '' && steps.destino.outputs.tailnet == 'true'
+        env:
+          TS_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          TS_SEGREDO: ${{ secrets.TS_OAUTH_SECRET }}
+          HOST: ${{ inputs.host }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TS_ID" ] || [ -z "$TS_SEGREDO" ]; then
+            echo "::error::$HOST so se alcanca pela tailnet, e faltam TS_OAUTH_CLIENT_ID e/ou TS_OAUTH_SECRET. Grave os dois no repositorio (bin/semear_secret.py)."
+            exit 1
+          fi
 
       - name: Preparar
         uses: slipalison/github-workflows/.github/actions/preparar@main
@@ -212,6 +273,42 @@ jobs:
       - name: Instalar dotnet-sonarscanner
         if: env.SONAR_TOKEN != '' && inputs.modo == 'dotnet'
         run: dotnet tool install --global dotnet-sonarscanner
+
+      # A tailnet antes do `begin`: ele ja baixa o perfil de regras do servidor.
+      # Os mesmos dois passos aparecem de novo no modo generico, mais abaixo,
+      # depois dos testes. Ver o cabecalho, "A INSTANCIA DO HOMELAB".
+      - name: Entrar na tailnet (dotnet)
+        if: env.SONAR_TOKEN != '' && inputs.modo == 'dotnet' && steps.destino.outputs.tailnet == 'true'
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: ${{ inputs.tailscale_tag }}
+          # Versao e sha256 fixos: sem eles a action baixa o .sha256 do mesmo
+          # servidor do binario, o que confere integridade e nao origem.
+          version: "1.94.2"
+          sha256sum: c6f99a5d774c7783b56902188d69e9756fc3dddfb08ac6be4cb2585f3fecdc32
+          use-cache: "false"
+
+      - name: Esperar o SonarQube responder (dotnet)
+        if: env.SONAR_TOKEN != '' && inputs.modo == 'dotnet' && steps.destino.outputs.tailnet == 'true'
+        env:
+          HOST: ${{ inputs.host }}
+          TAG: ${{ inputs.tailscale_tag }}
+        run: |
+          set -euo pipefail
+          # A rota da tailnet leva alguns segundos para valer depois do `up`.
+          # 24 x 5 s cobre isso e um SonarQube reiniciando; mais que isso e
+          # servidor fora, e o job deve dizer, nao esperar o timeout do scanner.
+          for _ in $(seq 1 24); do
+            if curl -fsS --max-time 5 "$HOST/api/system/status" | grep -q '"status":"UP"'; then
+              echo "SonarQube UP em $HOST"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::$HOST nao respondeu UP em 2 minutos pela tailnet. Confira a ACL (tag $TAG), a rota 10.10.0.0/24 do pve e o pod do SonarQube."
+          exit 1
 
       - name: begin
         if: env.SONAR_TOKEN != '' && inputs.modo == 'dotnet'
@@ -298,6 +395,37 @@ jobs:
           echo "--- sonar-project.properties ---"
           cat sonar-project.properties
 
+      # A tailnet so agora, depois dos testes: o codigo do PR ja rodou, e o
+      # runner fica na tailnet so o tempo da analise.
+      - name: Entrar na tailnet (generico)
+        if: env.SONAR_TOKEN != '' && inputs.modo == 'generico' && steps.destino.outputs.tailnet == 'true'
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: ${{ inputs.tailscale_tag }}
+          version: "1.94.2"
+          sha256sum: c6f99a5d774c7783b56902188d69e9756fc3dddfb08ac6be4cb2585f3fecdc32
+          use-cache: "false"
+
+      - name: Esperar o SonarQube responder (generico)
+        if: env.SONAR_TOKEN != '' && inputs.modo == 'generico' && steps.destino.outputs.tailnet == 'true'
+        env:
+          HOST: ${{ inputs.host }}
+          TAG: ${{ inputs.tailscale_tag }}
+        run: |
+          set -euo pipefail
+          # O mesmo do passo dotnet.
+          for _ in $(seq 1 24); do
+            if curl -fsS --max-time 5 "$HOST/api/system/status" | grep -q '"status":"UP"'; then
+              echo "SonarQube UP em $HOST"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::$HOST nao respondeu UP em 2 minutos pela tailnet. Confira a ACL (tag $TAG), a rota 10.10.0.0/24 do pve e o pod do SonarQube."
+          exit 1
+
       - name: Analisar
         if: env.SONAR_TOKEN != '' && inputs.modo == 'generico'
         uses: SonarSource/sonarqube-scan-action@22918119ff8e1ca75a623e15c8296b6ea4fbe28f # v8.2.1
@@ -318,6 +446,9 @@ jobs:
             echo "| Projeto | \`${{ inputs.projeto }}\` |"
             echo "| Instancia | ${{ inputs.host }} |"
             echo "| Modo | ${{ inputs.modo }} |"
+            if [ "${{ steps.destino.outputs.tailnet }}" = "true" ]; then
+              echo "| Caminho | tailnet, no efemero \`${{ inputs.tailscale_tag }}\` |"
+            fi
             echo ""
             echo "\`sonar.qualitygate.wait=true\`: o scanner espera o veredito do"
             echo "Quality Gate e derruba este job se ele reprovar. Sem essa flag a"

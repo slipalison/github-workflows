@@ -372,7 +372,7 @@ licença.
 
 | | Público | Privado |
 |---|---|---|
-| **Sonar** | SonarQube Cloud, gratuito | Cloud é pago → `sonar_host` aponta para instância própria |
+| **Sonar** | SonarQube Cloud, gratuito | Cloud é pago → `sonar_host` aponta para a instância do homelab, pela tailnet |
 | **SARIF na aba Security** | gratuito | exige GitHub Advanced Security (pago) |
 | **CodeQL** | gratuito | idem |
 
@@ -384,6 +384,36 @@ portões continuam derrubando o run. Perde-se a aba, não a verificação.
 O que **não** se faz é deixar um repositório privado sem análise e fingir que o
 portão existe. Para isso há `sonar_exigir_token: false`, que é explícito, aparece
 no diff, e emite `::warning::` em todo run.
+
+### A instância do homelab, pela tailnet
+
+Desde 2026-10-20 a instância própria existe: SonarQube Community Build 26.5 com
+o plugin de branches, no cluster de casa (`homelab-gitops`,
+`platform/sonarqube/`). Lá a análise vale para **branch e PR**, não só para a
+main, e não há teto de linhas. O endereço é de rede privada
+(`http://10.10.0.13:30900`), então o job do Sonar entra na tailnet do dono:
+
+| Peça | Onde |
+|---|---|
+| `sonar_host` de faixa privada liga a tailnet | `sonar.yml`, passo "Cloud ou Server?" |
+| Nó efêmero com `tag:ci-sonar` | `tailscale/github-action`, versão e sha256 do binário fixos |
+| O que a tag alcança: só `10.10.0.13:30900` | ACL da tailnet, com testes que recusam salvar se ela alcançar mais |
+| Credencial | OAuth client do Tailscale: `TS_OAUTH_CLIENT_ID` e `TS_OAUTH_SECRET`, gravados pelo `semear_secret.py` |
+
+**Por que não pelo túnel da Cloudflare**, como os painéis: o Bot Fight Mode
+desafia o IP de datacenter do runner antes do Access (o `cloudflare-preview.yml`
+ja mediu isso), e o scanner não sabe mandar os cabeçalhos do token de serviço.
+
+**Por que OAuth client, e não federação de identidade**, que dispensaria o
+segredo: a federação pede `id-token: write`, e o GitHub confere a permissão de
+workflow chamado de forma estática. Todo repositório que chama o `pipeline.yml`
+sem conceder `id-token` deixaria de partir, inclusive os públicos, que nem usam
+a tailnet.
+
+A entrada na tailnet é o mais tarde possível: depois dos testes no modo
+genérico, que é onde o código do PR roda. `host` privado sem os dois secrets
+reprova o job na hora, pela mesma regra do `SONAR_TOKEN`: sem isso o erro
+apareceria no scanner como `connection timed out`.
 
 ### Preparar um repositório do zero, num comando
 
