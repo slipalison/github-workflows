@@ -415,6 +415,23 @@ jobs:
       # ubuntu-24.04 (glibc 2.39) restaurado num ubuntu-22.04 levaria para o
       # pacote um binario que so roda na glibc nova, e o motivo de pedir o
       # 22.04 era justamente a glibc velha.
+      # O `target/` restaurado ocupa varios GB descompactado, e a imagem nova do
+      # ubuntu-latest (Ubuntu 26, migracao a partir de 2026-10-19) chega com
+      # menos disco livre: o basalto caiu duas vezes no mesmo commit com
+      # "No space left on device" dentro do restore, e passou noutra maquina
+      # da imagem antiga. O que sai daqui sao SDKs que nenhum componente rust
+      # usa (Android, .NET, Haskell, CodeQL); `rm` de caminho que nao existe
+      # nao falha. O `df` antes e depois fica no log para a proxima medida.
+      - name: Liberar disco para o target
+        if: matrix.c.linguagem == 'rust' && runner.os == 'Linux'
+        working-directory: .
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+
       - name: Cache do target
         if: matrix.c.linguagem == 'rust'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
