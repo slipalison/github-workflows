@@ -921,7 +921,12 @@ def derivar(arquivo: Path, destino: Path, n: int, repo: Path) -> tuple[Path, boo
     if n == 1:
         novo = max_paralelo(novo, 1)
     saida = dentro_de(destino, arquivo.name)
-    saida.write_text(novo)
+    # Gravado por um arquivo ja aberto, e nao por `Path.write_text`: o S2083
+    # trata o argumento do `write_text` como caminho e marcava o CONTEUDO do
+    # workflow (lido do repositorio) como se fosse ele. O caminho e o de
+    # `dentro_de`, conferido contra a pasta da copia.
+    with saida.open("w", encoding="utf-8") as copia:
+        copia.write(novo)
     return saida, trocas_sonar > 0, n
 
 
