@@ -937,11 +937,12 @@ def dentro_de(pasta: Path, nome: str) -> Path:
         or not NOME_DE_WORKFLOW.fullmatch(nome)
     ):
         raise ValueError(f"nome de workflow recusado: {nome!r}")
-    base = pasta.resolve()
-    saida = (base / nome).resolve()
-    if saida.parent != base:
+    # realpath + commonpath: a validacao que o Sonar reconhece (S2083).
+    base = os.path.realpath(pasta)
+    saida = os.path.realpath(os.path.join(base, nome))
+    if os.path.commonpath([base, saida]) != base or os.path.dirname(saida) != base:
         raise ValueError(f"{nome!r} sairia de {base}")
-    return saida
+    return Path(saida)
 
 
 # O portao da esteira reprova o Sonar desligado sem motivo escrito. Aqui o
