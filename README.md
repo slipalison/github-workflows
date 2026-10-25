@@ -877,8 +877,17 @@ python3 /caminho/para/github-workflows/bin/validar_local.py --status   # o HEAD 
   numa máquina de 4 GB derrubava a sessão de quem chamou.
 - **Protege a máquina.** Os passos rodam numa cópia do repositório, com HOME
   isolado em `~/.cache/validar-local/home` e sem token com escrita. `git@github.com:`
-  vira HTTPS com a credencial do `gh`. Um `validar-local` por vez, e um job por
-  vez, porque dividem Docker e portas. No fim, ele confere que a árvore não mudou.
+  vira HTTPS com a credencial do `gh`. Um `validar-local` por vez, porque os
+  jobs dividem Docker e portas. No fim, ele confere que a árvore não mudou.
+- **Jobs leves juntos, pesado sozinho.** Até `VALIDAR_LOCAL_JOBS` jobs leves
+  rodam ao mesmo tempo (padrão 2; `1` é um por vez, como antes). Pesado é o
+  passo que compila (`cargo`, `dotnet`, `go`), sobe o E2E (Playwright,
+  `docker compose`), constrói imagem, roda o Sonar ou mexe no apt — lido do
+  próprio workflow (nome, `run:`, scripts que ele cita e `uses:`), sem lista de
+  job. Na cópia de cada workflow, um passo "espera a vez" antes do primeiro e
+  antes de cada passo pesado, com o mesmo `if:` dele, faz o job esperar ficar
+  sozinho só quando o passo vai rodar. Cada job tem o seu log, além do log do
+  workflow. Detalhes e o pico de memória medido, no cabeçalho do script.
 - **Segredo nunca por argumento.** Vem do ambiente e dos arquivos
   `~/.config/<repositório>/*.env`. `GH_PACKAGES_TOKEN` é o token do `gh`.
 - **`actionlint` só nos workflows que mudaram** em relação à `main`: um aviso
@@ -892,7 +901,7 @@ do sistema) — ele confere antes de rodar e diz o que falta. As versões do
 `act`, do `actionlint` e do `yq` estão fixadas no script, com sha256.
 
 **Memória.** Numa máquina de 4 GB, o `cargo`, o Semgrep e o TruffleHog juntos
-estouram a memória. Ele roda um job por vez, limita o `cargo` a dois processos e
+estouram a memória. Ele deixa o job pesado sozinho, limita o `cargo` a dois processos e
 se marca como a primeira vítima do OOM killer (`oom_score_adj=1000`), para que
 seja a validação a morrer, e não a sessão de quem a chamou. Um `/tmp` em tmpfs
 conta como memória.
