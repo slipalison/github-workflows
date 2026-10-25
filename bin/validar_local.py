@@ -329,6 +329,30 @@ def sandbox() -> Path:
     return home
 
 
+def limpar_rodadas_do_act() -> int:
+    """O act, em modo host, cria para cada job uma pasta de nome sorteado em
+    ~/.cache/act do sandbox (16 hex: act/, hostexecutor/ e tmp/, com a copia do
+    repositorio e o `target` do Rust, ate 4 GB) e nao a apaga. Nenhuma e
+    reaproveitada, porque o nome e sorteado de novo a cada job. Medido em
+    2026-10-17 na caixa dev: 88 pastas, 13 GB, com o disco em 93%.
+
+    Roda com a trava na mao, entao nenhuma rodada esta usando alguma: sai o que
+    a rodada anterior deixou. Fica o resto de ~/.cache/act: o tool_cache (o
+    Python, o Node e o syft dos setup-*) e os clones das actions, que sao
+    reaproveitados. O cache do `actions/cache` (actcache) o proprio act poda.
+    Devolve quantos MB sairam."""
+    act = CACHE / "home" / ".cache" / "act"
+    if not act.is_dir():
+        return 0
+    total = 0
+    for pasta in act.iterdir():
+        if pasta.is_symlink() or not re.fullmatch(r"[0-9a-f]{16}", pasta.name):
+            continue
+        total += sum(f.lstat().st_size for f in pasta.rglob("*") if not f.is_symlink())
+        shutil.rmtree(pasta, ignore_errors=True)
+    return total // (1024 * 1024)
+
+
 def python_no_cache_de_ferramentas(home: Path) -> None:
     """O `setup-python` procura o Python pre-compilado PARA UBUNTU e nao acha
     versao para o Debian (medido: "3.13 ... was not found for Debian 13"). O
@@ -1681,6 +1705,9 @@ def validar(args: argparse.Namespace, repo: Path, arvore: str, antes: str) -> in
     trava = travar_a_maquina()
     if trava is None:
         return falha("outro validar-local esta rodando (os dois disputariam Docker e portas)")
+    liberados = limpar_rodadas_do_act()
+    if liberados:
+        diz(f"{FRACO}{liberados} MB de rodadas anteriores do act apagados{FIM}")
 
     escolhidos = escolher(args, pasta_wf, todos)
     if isinstance(escolhidos, str):
