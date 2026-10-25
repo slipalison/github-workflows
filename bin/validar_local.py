@@ -471,12 +471,17 @@ USES_PESADO = re.compile(r"(docker/build-push-action|docker/bake-action|sonarsou
 SO_EXPRESSAO = re.compile(r"^\s*\$\{\{[^}]*\}\}\s*$")
 # Script do repositorio citado num `run:` (`bash .github/scripts/run-families.sh`):
 # o comando pesado mora nele, e nao no YAML.
-SCRIPT_CITADO = re.compile(
-    r"(?<![\w$/{}.-])((?:\./)?[\w-]+(?:/[\w.-]+)*\.(?:sh|bash|py|mjs|js|ts))\b"
-)
+# Uma classe so, sem quantificadores encadeados: a forma do caminho e conferida
+# em `scripts_citados` (a regex antiga, com `[\w.-]+` seguido de `\.ext`,
+# retrocedia de forma super-linear; Sonar S8786).
+CANDIDATO_A_SCRIPT = re.compile(r"(?<![\w$/{}.-])[\w./-]+")
+EXTENSOES_DE_SCRIPT = (".sh", ".bash", ".py", ".mjs", ".js", ".ts")
+TRECHO_DE_CAMINHO = re.compile(r"[\w.-]+")
+PRIMEIRO_TRECHO = re.compile(r"[\w-]+")
 NOME_VEZ = "validar-local: espera a vez"
 NAO_ARQUIVO = re.compile(r"[^\w.-]+")
 PASTA_VEZ = CACHE / "vez"
+ESTADO_DA_VEZ = "estado.json"
 
 
 def paralelos() -> int | str:
@@ -491,6 +496,42 @@ def sem_comentario(texto: str) -> str:
     return "\n".join(ln for ln in texto.split("\n") if not ln.lstrip().startswith(("#", "//")))
 
 
+def _forma_de_script(caminho: str) -> bool:
+    """`[./]trecho[/trecho...].ext`: o primeiro trecho sem ponto, os outros com."""
+    caminho = caminho.removeprefix("./")
+    extensao = next((e for e in EXTENSOES_DE_SCRIPT if caminho.endswith(e)), None)
+    if extensao is None:
+        return False
+    trechos = caminho[: -len(extensao)].split("/")
+    return bool(PRIMEIRO_TRECHO.fullmatch(trechos[0])) and all(
+        TRECHO_DE_CAMINHO.fullmatch(t) for t in trechos[1:]
+    )
+
+
+def _fronteira(texto: str, posicao: int) -> bool:
+    """Fim do texto, ou um caractere que nao e de palavra: o `\\b` de antes."""
+    return posicao == len(texto) or not (texto[posicao].isalnum() or texto[posicao] == "_")
+
+
+def scripts_citados(texto: str) -> list[str]:
+    """Scripts do repositorio citados no texto: em cada sequencia de caracteres
+    de caminho, o maior comeco com a forma de script que termina numa fronteira
+    de palavra."""
+    citados = []
+    for sequencia in CANDIDATO_A_SCRIPT.findall(texto):
+        fim = next(
+            (
+                f
+                for f in range(len(sequencia), 0, -1)
+                if _fronteira(sequencia, f) and _forma_de_script(sequencia[:f])
+            ),
+            None,
+        )
+        if fim:
+            citados.append(sequencia[:fim])
+    return citados
+
+
 def texto_pesado(texto: str, repo: Path, vistos: set[Path], fundo: int = 0) -> bool:
     texto = sem_comentario(texto)
     if PESADO.search(texto):
@@ -498,7 +539,7 @@ def texto_pesado(texto: str, repo: Path, vistos: set[Path], fundo: int = 0) -> b
     if fundo >= 3:
         return False
     base = repo.resolve()
-    for nome in SCRIPT_CITADO.findall(texto):
+    for nome in scripts_citados(texto):
         alvo = (repo / nome).resolve()
         if alvo in vistos or not alvo.is_relative_to(base) or not alvo.is_file():
             continue
@@ -559,9 +600,7 @@ def cercar(texto: str, repo: Path) -> str | None:
     """Poe a vez em todo job com `steps:`. Mexe no TEXTO, para nao perder
     comentario nem forma, e confere pelo yq que o resultado, sem os passos
     postos, e o MESMO workflow. None quando nao da para cercar com certeza."""
-    if any(
-        c in str(x) for x in (sys.executable, Path(__file__).resolve(), PASTA_VEZ) for c in "'\n"
-    ):
+    if not _caminhos_cabem_no_passo():
         return None
     yq = ferramenta("yq")
     dados = ler_texto(yq, texto)
@@ -569,10 +608,38 @@ def cercar(texto: str, repo: Path) -> str | None:
     if not isinstance(jobs, dict):
         return texto
     linhas = texto.split("\n")
+    antes_de = _portoes_por_linha(linhas, jobs, repo)
+    if antes_de is None:
+        return None
+    saida: list[str] = []
+    for n, linha in enumerate(linhas):
+        saida += antes_de.get(n, [])
+        saida.append(linha)
+    novo = "\n".join(saida)
+    return novo if _sem_os_portoes(ler_texto(yq, novo)) == dados else None
+
+
+def _caminhos_cabem_no_passo() -> bool:
+    """O passo posto leva estes caminhos entre aspas simples, numa linha so."""
+    caminhos = (sys.executable, Path(__file__).resolve(), PASTA_VEZ)
+    return not any(c in str(x) for x in caminhos for c in "'\n")
+
+
+def _fim_do_bloco(linhas: list[str], chave: int, recuo: int) -> int:
+    """A primeira linha, depois de `chave`, que ja nao e do bloco dela."""
+    fim = chave + 1
+    while fim < len(linhas) and not (_conta(linhas[fim]) and _recuo(linhas[fim]) <= recuo):
+        fim += 1
+    return fim
+
+
+def _blocos_de_job(linhas: list[str]) -> list[tuple[str, int, int]] | None:
+    """Cada job de `jobs:` no texto: o nome, a linha da chave e a linha onde o
+    bloco acaba. None quando o texto tem uma forma que este leitor nao conhece."""
     inicio = next((i for i, ln in enumerate(linhas) if re.match(r"^jobs:\s*(#.*)?$", ln)), None)
     if inicio is None:
         return None
-    antes_de: dict[int, list[str]] = {}
+    blocos: list[tuple[str, int, int]] = []
     i, recuo_job = inicio + 1, None
     while i < len(linhas):
         if not _conta(linhas[i]):
@@ -584,36 +651,51 @@ def cercar(texto: str, repo: Path) -> str | None:
         chave = re.match(rf"^ {{{recuo_job}}}(['\"]?)([\w-]+)\1\s*:\s*(#.*)?$", linhas[i])
         if _recuo(linhas[i]) != recuo_job or not chave:
             return None
-        fim = i + 1
-        while fim < len(linhas) and not (_conta(linhas[fim]) and _recuo(linhas[fim]) <= recuo_job):
-            fim += 1
-        job = jobs.get(chave.group(2))
-        if isinstance(job, dict) and "steps" in job:
-            itens = _itens(linhas, i + 1, fim)
-            passos = job.get("steps") or []
-            if itens is None or len(itens[1]) != len(passos):
-                return None
-            recuo_item, posicoes = itens
-            for k, (pos, passo) in enumerate(zip(posicoes, passos, strict=True)):
-                bloco = antes_de.setdefault(pos, [])
-                if k == 0:
-                    bloco += portao(recuo_item, "leve", None)
-                condicao = passo.get("if") if isinstance(passo, dict) else None
-                if condicao is not False and passo_pesado(passo, repo):
-                    bloco += portao(recuo_item, "pesado", condicao)
+        fim = _fim_do_bloco(linhas, i, recuo_job)
+        blocos.append((chave.group(2), i, fim))
         i = fim
-    saida: list[str] = []
-    for n, linha in enumerate(linhas):
-        saida += antes_de.get(n, [])
-        saida.append(linha)
-    novo = "\n".join(saida)
-    conferir = ler_texto(yq, novo)
-    for job in (conferir.get("jobs") or {}).values():
+    return blocos
+
+
+def _portoes_por_linha(linhas: list[str], jobs: dict, repo: Path) -> dict[int, list[str]] | None:
+    """As linhas da vez a por antes de cada linha do texto. None quando os
+    itens de `steps:` no texto nao batem com os passos que o yq leu."""
+    blocos = _blocos_de_job(linhas)
+    if blocos is None:
+        return None
+    antes_de: dict[int, list[str]] = {}
+    for nome, chave, fim in blocos:
+        job = jobs.get(nome)
+        if not (isinstance(job, dict) and "steps" in job):
+            continue
+        itens = _itens(linhas, chave + 1, fim)
+        passos = job.get("steps") or []
+        if itens is None or len(itens[1]) != len(passos):
+            return None
+        recuo_item, posicoes = itens
+        for k, (pos, passo) in enumerate(zip(posicoes, passos, strict=True)):
+            antes_de.setdefault(pos, []).extend(_portoes_do_passo(recuo_item, k == 0, passo, repo))
+    return antes_de
+
+
+def _portoes_do_passo(recuo: int, primeiro: bool, passo: dict, repo: Path) -> list[str]:
+    """O primeiro passo pega um lugar de leve; um passo pesado, com o mesmo
+    `if:` dele, espera o job ficar sozinho."""
+    linhas = portao(recuo, "leve", None) if primeiro else []
+    condicao = passo.get("if") if isinstance(passo, dict) else None
+    if condicao is not False and passo_pesado(passo, repo):
+        linhas += portao(recuo, "pesado", condicao)
+    return linhas
+
+
+def _sem_os_portoes(workflow: dict) -> dict:
+    """O workflow lido sem os passos que o `cercar` pos."""
+    for job in (workflow.get("jobs") or {}).values():
         if isinstance(job, dict) and isinstance(job.get("steps"), list):
             job["steps"] = [
                 p for p in job["steps"] if not str(p.get("name", "")).startswith(NOME_VEZ)
             ]
-    return novo if conferir == dados else None
+    return workflow
 
 
 def _itens(linhas: list[str], de: int, ate: int) -> tuple[int, list[int]] | None:
@@ -650,7 +732,7 @@ def _itens(linhas: list[str], de: int, ate: int) -> tuple[int, list[int]] | None
 def estado_da_vez(pasta: Path):
     with (pasta / "trava").open("a+") as trava:
         fcntl.flock(trava, fcntl.LOCK_EX)
-        arquivo = pasta / "estado.json"
+        arquivo = pasta / ESTADO_DA_VEZ
         estado = json.loads(arquivo.read_text())
         yield estado
         temporario = arquivo.with_suffix(".tmp")
@@ -678,13 +760,13 @@ def preparar_vez(lugares: int) -> None:
     PASTA_VEZ.mkdir(parents=True, exist_ok=True)
     with (PASTA_VEZ / "trava").open("a+") as trava:
         fcntl.flock(trava, fcntl.LOCK_EX)
-        (PASTA_VEZ / "estado.json").write_text(
+        (PASTA_VEZ / ESTADO_DA_VEZ).write_text(
             json.dumps({"lugares": lugares, "pid": os.getpid(), "fila": [], "ativos": {}})
         )
 
 
 def liberar_vez(tokens: list[str]) -> None:
-    if not tokens or not (PASTA_VEZ / "estado.json").exists():
+    if not tokens or not (PASTA_VEZ / ESTADO_DA_VEZ).exists():
         return
     with estado_da_vez(PASTA_VEZ) as estado:
         for token in tokens:
@@ -693,13 +775,13 @@ def liberar_vez(tokens: list[str]) -> None:
         conceder(estado)
 
 
-def vez_no_passo(pasta: Path, peso: str) -> int:
+def vez_no_passo(pasta: Path, peso: str) -> None:
     """O passo posto pelo `cercar`: espera a vez e sai 0. Nunca reprova o job —
     se algo daqui falhar, ele segue sem esperar e diz por que."""
     try:
-        if not (pasta / "estado.json").exists():
+        if not (pasta / ESTADO_DA_VEZ).exists():
             diz("validar-local: fora de uma rodada; segue sem esperar")
-            return 0
+            return
         token = os.environ.get("VALIDAR_LOCAL_VEZ", "")
         if not re.fullmatch(r"[0-9a-f]{32}", token):
             token = os.urandom(16).hex()
@@ -713,7 +795,7 @@ def vez_no_passo(pasta: Path, peso: str) -> int:
         with estado_da_vez(pasta) as estado:
             atual = estado["ativos"].get(token)
             if atual == "pesado" or atual == peso:
-                return 0
+                return
             # Um leve que vira pesado devolve o lugar e entra no fim da fila:
             # quem espera nunca segura lugar, e por isso ninguem trava.
             estado["ativos"].pop(token, None)
@@ -728,14 +810,13 @@ def vez_no_passo(pasta: Path, peso: str) -> int:
                 os.kill(dono, 0)
             except OSError:
                 diz("validar-local: a rodada acabou; segue sem esperar")
-                return 0
+                return
             time.sleep(1)
         espera = time.monotonic() - inicio
         if espera >= 1:
             diz(f"validar-local: esperou a vez por {espera:.0f} s")
     except Exception as erro:  # noqa: BLE001 - a vez nunca reprova um job
         diz(f"validar-local: a vez falhou ({type(erro).__name__}); segue sem esperar")
-    return 0
 
 
 def sem_publicar(raiz: Path, n: int = 1, repo: Path | None = None) -> tuple[int, bool]:
@@ -839,9 +920,28 @@ def derivar(arquivo: Path, destino: Path, n: int, repo: Path) -> tuple[Path, boo
             novo = cercado
     if n == 1:
         novo = max_paralelo(novo, 1)
-    saida = destino / arquivo.name
+    saida = dentro_de(destino, arquivo.name)
     saida.write_text(novo)
     return saida, trocas_sonar > 0, n
+
+
+NOME_DE_WORKFLOW = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def dentro_de(pasta: Path, nome: str) -> Path:
+    """`pasta/nome`, so quando o nome e o de um workflow e o caminho fica
+    DENTRO da pasta: o nome vem do repositorio, e a copia nao grava fora."""
+    if (
+        not nome.endswith((".yml", ".yaml"))
+        or nome.startswith(".")
+        or not NOME_DE_WORKFLOW.fullmatch(nome)
+    ):
+        raise ValueError(f"nome de workflow recusado: {nome!r}")
+    base = pasta.resolve()
+    saida = (base / nome).resolve()
+    if saida.parent != base:
+        raise ValueError(f"{nome!r} sairia de {base}")
+    return saida
 
 
 # O portao da esteira reprova o Sonar desligado sem motivo escrito. Aqui o
@@ -858,8 +958,10 @@ def sem_sonar(texto: str) -> tuple[str, int]:
     saida: list[str] = []
     trocas = 0
     for linha in linhas:
-        achado = re.match(r"^(\s*)sonar_projeto:\s*(.*?)\s*(#.*)?$", linha)
-        if not achado or achado.group(2) in ("", '""', "''"):
+        # O comentario sai antes do match (o valor acaba no primeiro `#`, como
+        # antes): a regex fica sem quantificadores sobrepostos (Sonar S8786).
+        achado = re.match(r"(\s*)sonar_projeto:(.*)", linha.split("#", 1)[0])
+        if not achado or achado.group(2).strip() in ("", '""', "''"):
             saida.append(linha)
             continue
         recuo = achado.group(1)
@@ -1137,19 +1239,8 @@ def linha_de_job(linha: str) -> tuple[str, str] | None:
     return linha[1:fim].strip(), linha[fim + 1 :].strip()
 
 
-def rodar_act(
-    act: Path,
-    repo: Path,
-    workflow: Path,
-    job: str | None,
-    home: Path,
-    mapa: list[str],
-    evento_json: Path,
-    segredos_val: dict[str, str],
-    log: Path,
-    n: int = 1,
-) -> dict[str, str]:
-    ambiente = {
+def _ambiente_do_act(home: Path, segredos_val: dict[str, str]) -> dict[str, str]:
+    return {
         **{k: v for k, v in os.environ.items() if k not in ("HOME",)},
         **segredos_val,
         "HOME": str(home),
@@ -1171,6 +1262,17 @@ def rodar_act(
             ]
         ),
     }
+
+
+def _comando_do_act(
+    act: Path,
+    workflow: Path,
+    evento_json: Path,
+    mapa: list[str],
+    segredos_val: dict[str, str],
+    job: str | None,
+    n: int,
+) -> list[str]:
     comando = [
         str(act),
         "pull_request",
@@ -1196,58 +1298,100 @@ def rodar_act(
     ]
     if job:
         comando += ["-j", job]
+    return comando
+
+
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+LINHA_DA_VEZ = re.compile(r"\| validar-local: vez ([0-9a-f]{32}) ")
+
+
+class LogDoAct:
+    """O que o log do act diz de cada job, linha a linha: o resultado, o log
+    proprio de cada um (com jobs juntos, as linhas deles se intercalam no log
+    do workflow) e a vez que o job devolve quando acaba."""
+
+    def __init__(self, pasta_jobs: Path, abertos: contextlib.ExitStack) -> None:
+        self.jobs: dict[str, str] = {}
+        self.vezes: dict[str, list[str]] = {}
+        self.por_job: dict[str, typing.TextIO] = {}
+        self.pasta_jobs = pasta_jobs
+        self.abertos = abertos
+
+    def ler(self, linha: str) -> None:
+        limpa = ANSI.sub("", linha).rstrip()
+        if "Could not get lock /var/lib/apt" in limpa:
+            self.jobs["(apt ocupado)"] = "ambiente"
+        achado = linha_de_job(limpa)
+        if not achado:
+            return
+        nome, resto = achado
+        self._log_do_job(nome).write(linha)
+        self._anotar_vez(nome, resto)
+        self._anotar_resultado(nome, resto)
+
+    def _log_do_job(self, nome: str) -> typing.TextIO:
+        if nome not in self.por_job:
+            arquivo = self.pasta_jobs / f"{NAO_ARQUIVO.sub('_', nome).strip('_')[:120]}.log"
+            self.por_job[nome] = self.abertos.enter_context(arquivo.open("a", buffering=1))
+        return self.por_job[nome]
+
+    def _anotar_vez(self, nome: str, resto: str) -> None:
+        vez = LINHA_DA_VEZ.match(resto + " ")
+        if vez:
+            self.vezes.setdefault(nome, []).append(vez.group(1))
+        if "🏁  Job" in resto:
+            # O job acabou (passos, `post` e limpeza): a vez dele volta.
+            liberar_vez(self.vezes.pop(nome, []))
+
+    def _anotar_resultado(self, nome: str, resto: str) -> None:
+        if "🚀  Start image" in resto or ("⭐ Run Set up job" in resto and nome not in self.jobs):
+            self.jobs.setdefault(nome, "rodando")
+            diz(f"  {FRACO}…{FIM} {nome}")
+        elif "❌  Failure - Main" in resto:
+            diz(f"    {VERMELHO}falhou em {nome}:{FIM} {resto.split('Main', 1)[1].strip()}")
+        elif "🏁  Job succeeded" in resto:
+            self.jobs[nome] = "passou"
+            diz(f"  {VERDE}passou{FIM} {nome}")
+        elif "🏁  Job failed" in resto:
+            self.jobs[nome] = "reprovou"
+            diz(f"  {VERMELHO}reprovou{FIM} {nome}")
+
+
+def rodar_act(
+    act: Path,
+    repo: Path,
+    workflow: Path,
+    job: str | None,
+    home: Path,
+    mapa: list[str],
+    evento_json: Path,
+    segredos_val: dict[str, str],
+    log: Path,
+    n: int = 1,
+) -> dict[str, str]:
+    comando = _comando_do_act(act, workflow, evento_json, mapa, segredos_val, job, n)
     esperar_apt()
     preparar_vez(n)
-    jobs: dict[str, str] = {}
-    vezes: dict[str, list[str]] = {}
-    ansi = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
-    # Com jobs juntos, as linhas deles se intercalam no log do workflow; cada
-    # job tem tambem o seu, inteiro, em <log sem .log>/<job>.log.
+    # Cada job tem tambem o seu log, inteiro, em <log sem .log>/<job>.log.
     pasta_jobs = log.with_suffix("")
     pasta_jobs.mkdir(exist_ok=True)
-    por_job: dict[str, typing.TextIO] = {}
     with log.open("w", buffering=1) as saida, contextlib.ExitStack() as abertos:
         processo = subprocess.Popen(
             comando,
             cwd=repo,
-            env=ambiente,
+            env=_ambiente_do_act(home, segredos_val),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             errors="replace",
         )
         assert processo.stdout is not None
+        leitor = LogDoAct(pasta_jobs, abertos)
         for linha in processo.stdout:
             saida.write(linha)
-            limpa = ansi.sub("", linha).rstrip()
-            achado = linha_de_job(limpa)
-            if "Could not get lock /var/lib/apt" in limpa:
-                jobs["(apt ocupado)"] = "ambiente"
-            if not achado:
-                continue
-            nome, resto = achado
-            if nome not in por_job:
-                arquivo = pasta_jobs / f"{NAO_ARQUIVO.sub('_', nome).strip('_')[:120]}.log"
-                por_job[nome] = abertos.enter_context(arquivo.open("a", buffering=1))
-            por_job[nome].write(linha)
-            vez = re.match(r"\| validar-local: vez ([0-9a-f]{32}) ", resto + " ")
-            if vez:
-                vezes.setdefault(nome, []).append(vez.group(1))
-            if "🏁  Job" in resto:
-                # O job acabou (passos, `post` e limpeza): a vez dele volta.
-                liberar_vez(vezes.pop(nome, []))
-            if "🚀  Start image" in resto or ("⭐ Run Set up job" in resto and nome not in jobs):
-                jobs.setdefault(nome, "rodando")
-                diz(f"  {FRACO}…{FIM} {nome}")
-            elif "❌  Failure - Main" in resto:
-                diz(f"    {VERMELHO}falhou em {nome}:{FIM} {resto.split('Main', 1)[1].strip()}")
-            elif "🏁  Job succeeded" in resto:
-                jobs[nome] = "passou"
-                diz(f"  {VERDE}passou{FIM} {nome}")
-            elif "🏁  Job failed" in resto:
-                jobs[nome] = "reprovou"
-                diz(f"  {VERMELHO}reprovou{FIM} {nome}")
+            leitor.ler(linha)
         codigo = processo.wait()
+    jobs = leitor.jobs
     if codigo != 0 and all(v != "reprovou" for v in jobs.values()):
         jobs["(act)"] = "reprovou"
     return jobs
@@ -1449,10 +1593,61 @@ def rodar_workflows(
     return resultado
 
 
+def travar_a_maquina() -> typing.TextIO | None:
+    """A trava de um validar-local por vez nesta maquina (os dois disputariam
+    Docker e portas). Fica presa enquanto o arquivo devolvido estiver aberto."""
+    CACHE.mkdir(parents=True, exist_ok=True)
+    trava = (CACHE / "trava").open("w")
+    try:
+        fcntl.flock(trava, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        trava.close()
+        return None
+    return trava
+
+
+def esteira_fora_da_main(escolhidos: list[Path]) -> str | None:
+    refs = refs_da_esteira(escolhidos) - {"main"}
+    if not refs:
+        return None
+    return (
+        f"a esteira e chamada em {', '.join(sorted(refs))}, e nao em @main: as actions que "
+        "ela traz nesse ref nao estao mapeadas, e o harden-runner rodaria nesta maquina"
+    )
+
+
+def preparar_esteira(args: argparse.Namespace, repo: Path) -> tuple[Path, int] | str:
+    """A copia da esteira e quantos jobs rodam juntos. Se um workflow dela nao
+    der para cercar, a copia e refeita para rodar um job por vez."""
+    n = paralelos()
+    if isinstance(n, str):
+        return n
+    git("fetch", "--quiet", "origin", "main", cwd=repo, verificar=False)
+    raiz_esteira, cercada = esteira(args.esteira_local, n, repo)
+    if not cercada:
+        diz(f"{AMARELO}um workflow da esteira nao deu para cercar{FIM}: um job por vez")
+        n = 1
+        raiz_esteira, _ = esteira(args.esteira_local, n, repo)
+    return raiz_esteira, n
+
+
+def arvore_intocada(repo: Path, antes: str) -> bool:
+    """O act roda numa copia do repositorio, e o que ele fizer nao pode aparecer
+    aqui. Se aparecer, e defeito deste script ou de um passo, e a arvore que vai
+    para o PR nao e mais a que foi validada."""
+    depois = git("status", "--porcelain", cwd=repo)
+    if depois == antes:
+        return True
+    novos = sorted(set(depois.splitlines()) - set(antes.splitlines()))
+    diz(f"{VERMELHO}a rodada mexeu na arvore{FIM}: {', '.join(novos) or depois}")
+    return False
+
+
 def main() -> int:
     args = argumentos()
     if args.vez:
-        return vez_no_passo(args.vez_pasta or PASTA_VEZ, args.vez)
+        vez_no_passo(args.vez_pasta or PASTA_VEZ, args.vez)
+        return 0
     invalido = argumento_invalido(args)
     if invalido:
         return falha(invalido)
@@ -1464,7 +1659,11 @@ def main() -> int:
     antes = git("status", "--porcelain", cwd=repo)
     if args.status:
         return mostrar_status(repo, arvore)
+    return validar(args, repo, arvore, antes)
 
+
+def validar(args: argparse.Namespace, repo: Path, arvore: str, antes: str) -> int:
+    """A rodada: escolhe os workflows, prepara a esteira e roda cada um no act."""
     pasta_wf = repo / DIR_GITHUB / "workflows"
     todos = sorted([*pasta_wf.glob("*.yml"), *pasta_wf.glob("*.yaml")])
     if not todos:
@@ -1473,32 +1672,21 @@ def main() -> int:
     if problema:
         return falha(problema)
 
-    CACHE.mkdir(parents=True, exist_ok=True)
-    trava = (CACHE / "trava").open("w")
-    try:
-        fcntl.flock(trava, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+    trava = travar_a_maquina()
+    if trava is None:
         return falha("outro validar-local esta rodando (os dois disputariam Docker e portas)")
 
     escolhidos = escolher(args, pasta_wf, todos)
     if isinstance(escolhidos, str):
         return falha(escolhidos)
-    refs = refs_da_esteira(escolhidos) - {"main"}
-    if refs:
-        return falha(
-            f"a esteira e chamada em {', '.join(sorted(refs))}, e nao em @main: as actions que "
-            "ela traz nesse ref nao estao mapeadas, e o harden-runner rodaria nesta maquina"
-        )
+    problema = esteira_fora_da_main(escolhidos)
+    if problema:
+        return falha(problema)
 
-    n = paralelos()
-    if isinstance(n, str):
-        return falha(n)
-    git("fetch", "--quiet", "origin", "main", cwd=repo, verificar=False)
-    raiz_esteira, cercada = esteira(args.esteira_local, n, repo)
-    if not cercada:
-        diz(f"{AMARELO}um workflow da esteira nao deu para cercar{FIM}: um job por vez")
-        n = 1
-        raiz_esteira, _ = esteira(args.esteira_local, n, repo)
+    preparada = preparar_esteira(args, repo)
+    if isinstance(preparada, str):
+        return falha(preparada)
+    raiz_esteira, n = preparada
     # Quem chama a esteira repassa cada segredo pelo nome (`secrets:`), entao os
     # pedidos sao os dos workflows escolhidos.
     valores, faltam = segredos(repo, escolhidos)
@@ -1510,16 +1698,12 @@ def main() -> int:
 
     inicio = time.monotonic()
     ok = lint(ferramenta("actionlint"), repo)
-    resultado = rodar_workflows(repo, escolhidos, args, raiz_esteira, valores, n)
+    try:
+        resultado = rodar_workflows(repo, escolhidos, args, raiz_esteira, valores, n)
+    except ValueError as erro:
+        return falha(str(erro))
     minutos = (time.monotonic() - inicio) / 60
-    # O act roda numa copia do repositorio, e o que ele fizer nao pode aparecer
-    # aqui. Se aparecer, e defeito deste script ou de um passo, e a arvore que
-    # vai para o PR nao e mais a que foi validada.
-    depois = git("status", "--porcelain", cwd=repo)
-    if depois != antes:
-        novos = sorted(set(depois.splitlines()) - set(antes.splitlines()))
-        diz(f"{VERMELHO}a rodada mexeu na arvore{FIM}: {', '.join(novos) or depois}")
-        ok = False
+    ok = arvore_intocada(repo, antes) and ok
     ok = resumir(resultado, minutos) and ok
     if not ok:
         diz(f"\n{VERMELHO}REPROVADO{FIM}: conserte aqui antes de empurrar.")
