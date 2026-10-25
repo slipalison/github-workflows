@@ -22,8 +22,10 @@ uma action vazia, dita no resumo:
     github/codeql-action          envia SARIF para a aba Security do GitHub;
     docker/login-action           login no GHCR com o GITHUB_TOKEN, que aqui
                                   nao existe (e o PR nao publica imagem);
-    o Sonar                       `sonar_projeto` vazio: a analise e do
-                                  SonarCloud, e so o CI a mede;
+    o Sonar                       `sonar_projeto` vazio, e `sonar_dispensa`
+                                  com o motivo (sem ele o portao da esteira
+                                  reprova "Sonar desligado sem motivo"): a
+                                  analise e do SonarQube, e so o CI a mede;
     a publicacao da imagem        o job `imagem` publica `sha-<commit>` no
                                   GHCR ate no PR; na copia da esteira, todo
                                   `push: true` vira `push: false`.
@@ -825,7 +827,7 @@ def derivar(arquivo: Path, destino: Path, n: int, repo: Path) -> tuple[Path, boo
     com a vez em cada job. Devolve tambem quantos jobs podem rodar juntos
     nele: 1 quando algum job nao pode ser cercado e ha pesado no workflow."""
     texto = arquivo.read_text()
-    novo, trocas_sonar = re.subn(r"(?m)^(\s*sonar_projeto:).*$", r'\1 ""', texto)
+    novo, trocas_sonar = sem_sonar(texto)
     if n > 1:
         cercado = cercar(max_paralelo(novo, n), repo)
         motivo = None if cercado is not None else "o texto dele nao deu para cercar com certeza"
@@ -840,6 +842,40 @@ def derivar(arquivo: Path, destino: Path, n: int, repo: Path) -> tuple[Path, boo
     saida = destino / arquivo.name
     saida.write_text(novo)
     return saida, trocas_sonar > 0, n
+
+
+# O portao da esteira reprova o Sonar desligado sem motivo escrito. Aqui o
+# motivo e este: a analise e do CI, e o validar-local nao tem o token nem a rede
+# do SonarQube. So na COPIA, e so onde o `sonar_projeto` foi esvaziado aqui.
+MOTIVO_SEM_SONAR = "Sonar so no CI: validar-local nao tem token nem rede para o SonarQube"
+
+
+def sem_sonar(texto: str) -> tuple[str, int]:
+    """`sonar_projeto` vazio e `sonar_dispensa` com o motivo, no mesmo bloco
+    `with:`. Um `sonar_projeto` que ja era vazio fica como estava, com a
+    dispensa que o repositorio escreveu."""
+    linhas = texto.split("\n")
+    saida: list[str] = []
+    trocas = 0
+    for linha in linhas:
+        achado = re.match(r"^(\s*)sonar_projeto:\s*(.*?)\s*(#.*)?$", linha)
+        if not achado or achado.group(2) in ("", '""', "''"):
+            saida.append(linha)
+            continue
+        recuo = achado.group(1)
+        saida.append(f'{recuo}sonar_projeto: ""')
+        saida.append(f'{recuo}sonar_dispensa: "{MOTIVO_SEM_SONAR}"  # validar-local')
+        trocas += 1
+    if trocas:
+        # A dispensa que ja existisse no mesmo bloco viraria chave duplicada.
+        texto_novo = "\n".join(saida)
+        texto_novo = re.sub(
+            r'(?m)^(\s*)sonar_dispensa:(?!\s*"' + re.escape(MOTIVO_SEM_SONAR) + r'").*\n?',
+            "",
+            texto_novo,
+        )
+        return texto_novo, trocas
+    return texto, 0
 
 
 def reutilizavel_local_pesado(arquivo: Path, repo: Path) -> str | None:

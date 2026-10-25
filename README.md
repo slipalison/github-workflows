@@ -863,7 +863,9 @@ python3 /caminho/para/github-workflows/bin/validar_local.py --status   # o HEAD 
   - `harden-runner` — em modo host ele instalaria um agente de rede na sua máquina;
   - `codeql-action` — manda SARIF para a aba Security;
   - `docker/login-action` — sem `GITHUB_TOKEN` aqui, e o PR não publica imagem;
-  - o **Sonar** — a análise é do SonarCloud, e só o CI a mede;
+  - o **Sonar** — a análise é do SonarQube, e só o CI a mede; na cópia, o
+    `sonar_projeto` vazio vem com `sonar_dispensa` dizendo isso, para o portão
+    da esteira não reprovar a rodada local por "Sonar desligado sem motivo";
   - a **publicação da imagem** — o job `imagem` publica `sha-<commit>` no GHCR
     até no PR; na cópia da esteira que ele monta, todo `push: true` vira
     `push: false`. A imagem é construída e varrida pelo Trivy do mesmo jeito.
