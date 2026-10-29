@@ -20,6 +20,7 @@ name: Qualidade
 #   versao       opcional; vazio = padrao da action `preparar`
 #   caminho      diretorio de trabalho, padrao "."
 #   projeto      dotnet: .sln/.slnx/.csproj | node: workspace | go: ./...
+#                (go: com .golangci.yml no `caminho`, roda tambem o golangci-lint)
 #                rust: pacote do workspace (--package); vazio = --workspace
 #   cobertura    piso em %; 0 (padrao) desliga o portao daquele componente
 #   scripts_de_instalacao
@@ -393,6 +394,49 @@ jobs:
         if: matrix.c.linguagem == 'go'
         run: go vet ${{ matrix.c.projeto || './...' }}
 
+      - name: golangci-lint
+        if: matrix.c.linguagem == 'go'
+        # So com `.golangci.yml` (ou `.yaml`) no `caminho` do componente: a
+        # configuracao e do repositorio, que escolhe os linters (gosec, por
+        # exemplo) e as excecoes, com o motivo escrito la. Sem ela, o passo
+        # avisa e o componente continua so com o `go vet` de cima, como antes
+        # deste passo existir: ligar o lint padrao em quem ja chama a esteira
+        # reprovaria codigo que ninguem mudou.
+        #
+        # Binario pronto, versao fixa e hash conferido, como o cargo-audit: o
+        # sha256 e o do `golangci-lint-<versao>-checksums.txt` da release. O
+        # `go install` compilaria por minutos, e o script de instalacao do
+        # projeto baixa o que estiver no ar sem conferir nada que esteja aqui.
+        # Os formatadores (gofmt, goimports) entram pela mesma configuracao,
+        # na secao `formatters`, e reprovam como lint.
+        env:
+          VERSAO_GOLANGCI: "2.15.0"
+          SHA256_GOLANGCI: "9b7fe6a6bf6334b98decf8d86b11415ea7889afdabdd1959fdce23af2a9ebcea"
+          PROJETO: ${{ matrix.c.projeto || './...' }}
+        run: |
+          set -euo pipefail
+          config=""
+          for arquivo in .golangci.yml .golangci.yaml; do
+            if [ -f "$arquivo" ]; then config="$arquivo"; fi
+          done
+          if [ -z "$config" ]; then
+            echo "::warning::Sem .golangci.yml em ${PWD}: o componente go roda so o go vet."
+            exit 0
+          fi
+          if [ "$RUNNER_OS" != "Linux" ] || [ "$RUNNER_ARCH" != "X64" ]; then
+            echo "::error::golangci-lint: so ha binario conferido para Linux X64 (este e $RUNNER_OS $RUNNER_ARCH)."
+            exit 1
+          fi
+          nome="golangci-lint-${VERSAO_GOLANGCI}-linux-amd64"
+          tmp=$(mktemp -d)
+          curl --proto '=https' --tlsv1.2 -fsSL -o "$tmp/$nome.tar.gz" \
+            "https://github.com/golangci/golangci-lint/releases/download/v${VERSAO_GOLANGCI}/${nome}.tar.gz"
+          echo "${SHA256_GOLANGCI}  $tmp/$nome.tar.gz" | sha256sum -c -
+          tar xzf "$tmp/$nome.tar.gz" -C "$tmp"
+          "$tmp/$nome/golangci-lint" version
+          # shellcheck disable=SC2086 # PROJETO e uma lista de pacotes, como no go vet
+          "$tmp/$nome/golangci-lint" run --config "$config" $PROJETO
+
       - name: go test
         if: matrix.c.linguagem == 'go'
         run: |
@@ -400,8 +444,10 @@ jobs:
           go test ${{ matrix.c.projeto || './...' }} -race -coverprofile=resultados/cobertura.out
           # O portao le cobertura.xml/opencover/lcov; o Go escreve um formato
           # proprio. gocover-cobertura e a ponte, e e a mesma ponte que o
-          # SonarQube usa para Go.
-          go run github.com/boumenot/gocover-cobertura@latest \
+          # SonarQube usa para Go. Versao fixa, como toda ferramenta daqui: o
+          # @latest rodaria o que o dono publicasse amanha, com o que o job
+          # enxerga. O go.sum do proxy confere o modulo.
+          go run github.com/boumenot/gocover-cobertura@v1.5.0 \
             < resultados/cobertura.out > resultados/coverage.xml
 
       # ------------------------------------------------------------------ rust
