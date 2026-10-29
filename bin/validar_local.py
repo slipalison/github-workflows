@@ -1201,6 +1201,24 @@ def copia_do_repo(repo: Path) -> Path:
     return destino
 
 
+def privado(dono_repo: str) -> bool:
+    """A visibilidade do repositorio, como o GitHub a poe no evento.
+
+    A esteira decide por `github.event.repository.private` onde vai o Sonar e
+    se o SARIF (e com ele o CodeQL) tem onde ser publicado. Sem o campo, o
+    evento daqui contava como privado, e todo repositorio PUBLICO com
+    `linguagens_codeql` reprovava aqui o que passa no CI (comporta,
+    2026-10-29). Na duvida — sem rede, sem login — continua privado: e o lado
+    que a esteira tambem escolhe quando o campo falta.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9][\w.-]*/[A-Za-z0-9][\w.-]*", dono_repo):
+        return True
+    saida = subprocess.run(
+        ["gh", "api", f"repos/{dono_repo}", "--jq", ".private"], capture_output=True, text=True
+    )
+    return not (saida.returncode == 0 and saida.stdout.strip() == "false")
+
+
 def evento(repo: Path, destino: Path) -> Path:
     cabeca = git("rev-parse", "HEAD", cwd=repo)
     base = git("rev-parse", REF_MAIN, cwd=repo)
@@ -1214,7 +1232,12 @@ def evento(repo: Path, destino: Path) -> Path:
             "head": {"ref": git("branch", "--show-current", cwd=repo) or "HEAD", "sha": cabeca},
             "base": {"ref": "main", "sha": base},
         },
-        "repository": {"full_name": dono_repo, "name": curto, "owner": {"login": dono}},
+        "repository": {
+            "full_name": dono_repo,
+            "name": curto,
+            "owner": {"login": dono},
+            "private": privado(dono_repo),
+        },
     }
     arquivo = destino / "evento.json"
     arquivo.write_text(json.dumps(dados))
