@@ -485,7 +485,12 @@ jobs:
           # precisao e ganha o job inteiro: com build, o CodeQL precisa do SDK,
           # das dependencias privadas e do tempo de build, e passa a quebrar por
           # motivo que nao tem nada a ver com seguranca.
-          build-mode: none
+          #
+          # Go e a excecao: o extrator de Go nao tem modo `none` e o `init`
+          # morre com "Go does not support the none build mode" (comporta,
+          # run 40966473273). `autobuild` roda o `go build` do proprio CodeQL,
+          # com o Go do runner; o `go` do go.mod baixa o toolchain que faltar.
+          build-mode: ${{ matrix.linguagem == 'go' && 'autobuild' || 'none' }}
           queries: security-extended
 
       - name: Analisar
