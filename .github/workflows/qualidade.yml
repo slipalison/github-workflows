@@ -428,7 +428,11 @@ jobs:
             exit 1
           fi
           nome="golangci-lint-${VERSAO_GOLANGCI}-linux-amd64"
-          tmp=$(mktemp -d)
+          # Em $RUNNER_TEMP, e apagado no fim: no validar-local (act em modo
+          # host) o /tmp e o da maquina e sobrevive entre rodadas; eram 55 MB
+          # por rodada, acumulando.
+          tmp=$(mktemp -d -p "$RUNNER_TEMP")
+          trap 'rm -rf "$tmp"' EXIT
           curl --proto '=https' --tlsv1.2 -fsSL -o "$tmp/$nome.tar.gz" \
             "https://github.com/golangci/golangci-lint/releases/download/v${VERSAO_GOLANGCI}/${nome}.tar.gz"
           echo "${SHA256_GOLANGCI}  $tmp/$nome.tar.gz" | sha256sum -c -
