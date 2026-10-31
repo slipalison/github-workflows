@@ -139,6 +139,20 @@ on:
         required: false
         type: number
         default: 20
+      runner:
+        description: >-
+          Rotulo do runner dos jobs PESADOS — qualidade, imagem, sonar e as
+          varreduras do seguranca. Padrao `ubuntu-latest`, o do GitHub. `casa`
+          manda esses jobs para o runner sob demanda do pve
+          (distros-setup/proxmox/RUNNER.md), que nao cobra minuto. Os jobs de um
+          minuto (versao, portao, publicar, lancar) ficam no GitHub de qualquer
+          jeito: la o harden-runner bloqueia a saida de rede, e e neles que
+          estao os tokens de escrita. Repositorio PUBLICO ignora este input e
+          fica no GitHub: num runner de casa, o PR de qualquer pessoa rodaria
+          codigo dentro de casa.
+        required: false
+        type: string
+        default: ubuntu-latest
 
       # -------------------------------------------------------------- imagem --
       imagem:
@@ -402,6 +416,7 @@ jobs:
     with:
       componentes: ${{ inputs.componentes }}
       timeout: ${{ inputs.timeout_qualidade }}
+      runner: ${{ toJSON(github.event.repository.private) == 'true' && inputs.runner || 'ubuntu-latest' }}
       versao: ${{ needs.versao.outputs.versao }}
     secrets:
       GH_PACKAGES_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
@@ -415,6 +430,7 @@ jobs:
     uses: slipalison/github-workflows/.github/workflows/build-push.yml@main
     with:
       image: ${{ inputs.imagem }}
+      runner: ${{ toJSON(github.event.repository.private) == 'true' && inputs.runner || 'ubuntu-latest' }}
       context: ${{ inputs.contexto_build }}
       dockerfile: ${{ inputs.dockerfile }}
       trivyignores: ${{ inputs.trivyignores }}
@@ -430,6 +446,7 @@ jobs:
     uses: slipalison/github-workflows/.github/workflows/sonar.yml@main
     with:
       projeto: ${{ inputs.sonar_projeto }}
+      runner: ${{ toJSON(github.event.repository.private) == 'true' && inputs.runner || 'ubuntu-latest' }}
       organizacao: ${{ inputs.sonar_organizacao }}
       # Privado vai para o homelab, publico para a Cloud, e quem decide e a
       # visibilidade, como no `publicar_sarif: auto`: a Cloud gratuita trava
@@ -472,6 +489,7 @@ jobs:
     uses: slipalison/github-workflows/.github/workflows/seguranca.yml@main
     with:
       linguagens_codeql: ${{ inputs.linguagens_codeql }}
+      runner: ${{ toJSON(github.event.repository.private) == 'true' && inputs.runner || 'ubuntu-latest' }}
       caminho_iac: ${{ inputs.caminho_iac }}
       publicar_sarif: ${{ inputs.publicar_sarif }}
 
