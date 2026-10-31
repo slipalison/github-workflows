@@ -49,6 +49,14 @@ on:
         required: false
         type: string
         default: "auto"
+      runner:
+        description: >-
+          Rotulo do runner. Padrao `ubuntu-latest`; `casa` e o runner sob
+          demanda do pve (distros-setup/proxmox/RUNNER.md). O pipeline.yml so
+          repassa `casa` para repositorio privado.
+        required: false
+        type: string
+        default: ubuntu-latest
     outputs:
       tag:
         description: "Tag publicada (sha-<7>)"
@@ -73,7 +81,7 @@ permissions:
 jobs:
   build:
     name: Imagem
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 30
     permissions:
       contents: read

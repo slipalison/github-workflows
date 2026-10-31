@@ -29,7 +29,8 @@ name: Qualidade
 #                --ignore-scripts: um pacote comprometido executa na instalacao,
 #                antes de qualquer teste. Ligue so se algum pacote nativo
 #                precisar compilar — e saiba qual.
-#   so           runner do componente: ubuntu-* (padrao ubuntu-latest) ou
+#   so           runner do componente: ubuntu-* (padrao: o input `runner`,
+#                que e ubuntu-latest se ninguem passar outro) ou
 #                windows-*, este so com `linguagem: rust`, a unica medida no
 #                Windows. Fora disso, reprova no primeiro passo.
 #   pacotes_sistema
@@ -97,6 +98,14 @@ on:
         required: false
         type: string
         default: ""
+      runner:
+        description: >-
+          Rotulo do runner. Padrao `ubuntu-latest`; `casa` e o runner sob
+          demanda do pve (distros-setup/proxmox/RUNNER.md). O pipeline.yml so
+          repassa `casa` para repositorio privado.
+        required: false
+        type: string
+        default: ubuntu-latest
     secrets:
       GH_PACKAGES_TOKEN:
         description: >-
@@ -114,11 +123,11 @@ jobs:
     # `nome` no rotulo: com matriz, sem isto a tela mostra "qualidade (Object)"
     # em todos os jobs e nao da para saber qual falhou sem abrir cada um.
     name: ${{ matrix.c.nome }}
-    # `so` fora de ubuntu-*/windows-* cai no ubuntu-latest, e o passo
+    # `so` fora de ubuntu-*/windows-* cai no `runner` do input, e o passo
     # `Conferir componente` reprova com o motivo. Passado direto, um rotulo que
     # nenhum runner tem deixaria o job esperando na fila, sem passo nenhum que
     # dissesse por que.
-    runs-on: ${{ (startsWith(matrix.c.so, 'ubuntu-') || startsWith(matrix.c.so, 'windows-')) && matrix.c.so || 'ubuntu-latest' }}
+    runs-on: ${{ (startsWith(matrix.c.so, 'ubuntu-') || startsWith(matrix.c.so, 'windows-')) && matrix.c.so || inputs.runner }}
     timeout-minutes: ${{ inputs.timeout }}
     permissions:
       contents: read
