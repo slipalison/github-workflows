@@ -212,11 +212,48 @@ jobs:
             echo "essa pergunta vira arqueologia em cada repositorio."
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # ---------------------------------------------------- Trivy (binario) --
+      # Desde 2026-11-03 o get.trivy.dev, de onde o setup-trivy embutido na
+      # trivy-action baixa o binario, nao resolve (NXDOMAIN;
+      # aquasecurity/setup-trivy#42): a instalacao sai com o exit 6 do curl e
+      # derruba as Varreduras em todo run, de todo repositorio. O binario vem
+      # entao do GitHub Releases do proprio Trivy, conferido pelo checksums.txt
+      # da mesma release, e as duas varreduras abaixo pulam a instalacao da
+      # action (`skip-setup-trivy: true`) e usam este, pelo PATH. Versao igual a
+      # que a action v0.36.0 instalava. Quando o get.trivy.dev voltar, este passo
+      # e os dois `skip-setup-trivy` podem sair juntos.
+      - name: Instalar Trivy (GitHub Releases)
+        if: ${{ !cancelled() && steps.preparar.outcome == 'success' }}
+        env:
+          TRIVY_VERSAO: 0.70.0
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) arq=64bit ;;
+            aarch64 | arm64) arq=ARM64 ;;
+            *) echo "::error::Arquitetura $(uname -m) sem binario do Trivy aqui."; exit 1 ;;
+          esac
+          base="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSAO}"
+          pacote="trivy_${TRIVY_VERSAO}_Linux-${arq}.tar.gz"
+          somas="trivy_${TRIVY_VERSAO}_checksums.txt"
+          destino="$RUNNER_TEMP/trivy-bin"
+          mkdir -p "$destino"
+          curl -sSfL --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/$pacote" "$base/$pacote"
+          curl -sSfL --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/$somas" "$base/$somas"
+          # O checksum do pacote tem de estar na lista E bater; grep vazio
+          # derruba o passo pelo pipefail, antes do sha256sum.
+          (cd "$RUNNER_TEMP" && grep -E "  ${pacote}\$" "$somas" | sha256sum -c -)
+          tar -xzf "$RUNNER_TEMP/$pacote" -C "$destino" trivy
+          echo "$destino" >> "$GITHUB_PATH"
+          "$destino/trivy" --version
+
       # -------------------------------------------------------------- SCA --
       - name: SCA - Trivy no sistema de arquivos
         if: ${{ !cancelled() && steps.preparar.outcome == 'success' }}
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          # Usa o binario do passo "Instalar Trivy" (ver la por que).
+          skip-setup-trivy: true
           scan-type: fs
           scan-ref: .
           format: sarif
@@ -242,6 +279,8 @@ jobs:
         if: ${{ !cancelled() && steps.preparar.outcome == 'success' && inputs.caminho_iac != '' }}
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          # Usa o binario do passo "Instalar Trivy" (ver la por que).
+          skip-setup-trivy: true
           scan-type: config
           scan-ref: ${{ inputs.caminho_iac }}
           format: sarif
