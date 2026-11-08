@@ -158,7 +158,11 @@ jobs:
   sonar:
     name: Sonar
     runs-on: ${{ inputs.runner }}
-    timeout-minutes: 25
+    # 40 e nao 25: no runner do GitHub, os testes com cobertura do basalto levam
+    # de 14 a 20 min e a analise mais ~5,5; com 25 o job era cortado no meio do
+    # "Analisar" e a main ficava sem deploy (2026-11-08, tres vezes no mesmo dia).
+    # O minuto so e cobrado quando o job usa o tempo a mais.
+    timeout-minutes: 40
     permissions:
       contents: read
     env:
