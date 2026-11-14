@@ -379,6 +379,27 @@ jobs:
         run: dotnet-sonarscanner end /d:sonar.token="$SONAR_TOKEN"
 
       # ------------------------------------------------------------ generico --
+      # O mesmo passo do qualidade.yml ("Liberar disco para o target"), pelo
+      # mesmo motivo: na imagem nova do ubuntu-latest o disco livre ficou curto,
+      # e aqui os testes com cobertura deixam o `target/` do Rust inteiro no
+      # disco enquanto o scanner escreve o relatorio. Na main do basalto
+      # (c53ecebe, 2026-11-14) o scanner morreu com "No space left on device"
+      # gravando `.scannerwork/scanner-report/coverages-117.pb`, e a mesma
+      # arvore tinha passado no PR noutra maquina. Sai so SDK que nenhum
+      # `comando_testes` daqui usa (Android, .NET, Haskell, CodeQL); `rm` de
+      # caminho que nao existe nao falha. O `df` antes e depois fica no log.
+      # Fora do `linguagem: dotnet` (o `setup-dotnet` do `preparar` instala em
+      # /usr/share/dotnet) e fora de runner proprio, onde o disco e de quem o
+      # hospeda e nao se apaga nada.
+      - name: Liberar disco para os testes e a analise
+        if: env.SONAR_TOKEN != '' && inputs.modo == 'generico' && inputs.linguagem != 'dotnet' && runner.os == 'Linux' && runner.environment == 'github-hosted'
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+
       - name: Testes com cobertura (generico)
         if: env.SONAR_TOKEN != '' && inputs.modo == 'generico' && inputs.comando_testes != ''
         run: ${{ inputs.comando_testes }}
