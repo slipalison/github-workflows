@@ -959,8 +959,13 @@ python3 /caminho/para/github-workflows/bin/sonar_local.py --projeto slipalison_c
   limpo, **1** com problema novo, **2** quando não deu para medir (MCP fora, sem
   token, projeto ilegível), com o comando para subir o MCP.
 - **O que ele não mede, e o CI mede:** linguagem sem analisador no MCP (**Rust**,
-  contado em "só o CI mede", nunca em silêncio), a cobertura do código novo e a
-  duplicação. A análise é por arquivo: regra que precisa do projeto inteiro
+  contado em "só o CI mede", nunca em silêncio), a cobertura do código novo, a
+  duplicação e os **security hotspots**. O `analyze_code_snippet` só devolve
+  issues, e o portão exige todo hotspot novo revisado. Medido no basalto#194, ele
+  reprovou por dois S5852 (regex com backtracking) com zero problemas novos e
+  este script limpo. O resumo diz isso sempre que analisa um arquivo, e a regra
+  `sonarjs/slow-regex` do `eslint-plugin-sonarjs`, que é a mesma implementação do
+  SonarJS, reproduziu os dois. A análise é por arquivo: regra que precisa do projeto inteiro
   também fica para o CI. **Em Python, a análise de fluxo de segurança
   (`pythonsecurity:*`, como S6549 e S8707) é só do CI**: medido neste
   repositório, o MCP achou os 10 problemas comuns de um PR e nenhum dos 2 de

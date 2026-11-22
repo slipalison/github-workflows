@@ -804,7 +804,11 @@ class Falhas(Base):
             linhas[0],
             'src/a.ts:1 typescript:S1135 Complete the task associated to this "TODO" comment.',
         )
-        self.assertEqual(linhas[1], "sonar-local: 1 problema novo em 1 arquivo (1 analisado)")
+        self.assertEqual(
+            linhas[1],
+            "sonar-local: 1 problema novo em 1 arquivo (1 analisado); so o CI mede, "
+            + sonar_local.NOTA_HOTSPOTS,
+        )
         self.assertNotIn(CANARIO, self.saida(processo))
 
     def test_limpo_sai_0(self):
@@ -813,7 +817,11 @@ class Falhas(Base):
         with McpFalso() as mcp:
             processo = o.rodar(mcp.url)
         self.assertEqual(processo.returncode, 0, self.saida(processo))
-        self.assertEqual(processo.stdout.strip(), "sonar-local: 0 problemas novos em 1 arquivo")
+        self.assertEqual(
+            processo.stdout.strip(),
+            "sonar-local: 0 problemas novos em 1 arquivo; so o CI mede, "
+            + sonar_local.NOTA_HOTSPOTS,
+        )
 
     def test_mcp_fora_sai_2_e_diz_como_subir(self):
         o = self.com_problema()
@@ -1082,6 +1090,18 @@ class NotaDoPython(Base):
             "so o CI mede, em Python, a analise de fluxo de seguranca", resultado.resumo()
         )
         self.assertEqual({c["language"] for c in mcp.chamadas}, {"py"})
+
+    def test_com_arquivo_analisado_diz_que_os_hotspots_so_o_ci_mede(self):
+        o = self.oficina()
+        o.escrever("src/a.ts", BASE_A.replace("return 1", "return 2"))
+        with McpFalso() as mcp:
+            self.assertIn("so o CI mede, os security hotspots", o.medir(mcp.url).resumo())
+
+    def test_sem_arquivo_analisado_a_nota_dos_hotspots_nao_aparece(self):
+        o = self.oficina()
+        o.escrever("README.md", "nada que o Sonar analise\n")
+        with McpFalso() as mcp:
+            self.assertNotIn("hotspots", o.medir(mcp.url).resumo())
 
     def test_sem_python_a_nota_nao_aparece(self):
         o = self.oficina()
@@ -1606,6 +1626,13 @@ ISCAS = [
         "        pass",
         "NotaDoPython.test_arquivo_python_diz_que_a_analise_de_fluxo_so_o_ci_mede",
         "Python nao diz que o fluxo de seguranca so o CI mede",
+    ),
+    _s(
+        "sonar_local.py",
+        "    resultado.notas.append(NOTA_HOTSPOTS)\n",
+        "",
+        "NotaDoPython.test_com_arquivo_analisado_diz_que_os_hotspots_so_o_ci_mede",
+        "o resumo nao diz que os hotspots so o CI mede",
     ),
     _s(
         "sonar_local.py",

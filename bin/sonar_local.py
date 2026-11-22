@@ -42,7 +42,8 @@ funcao que ja estava acima de 15 e foi a 18 e o mesmo problema, como no Sonar).
 O QUE ELE NAO MEDE (e o CI mede)
 --------------------------------
 Linguagem sem analisador no MCP (Rust, por exemplo): entra na contagem "so o CI
-mede", nunca em silencio. A cobertura do codigo novo e a duplicacao tambem sao
+mede", nunca em silencio. A cobertura do codigo novo, a duplicacao e os security
+hotspots (o MCP so devolve issues; o portao exige todos revisados) tambem sao
 so do CI. E a analise do snippet nao enxerga outros arquivos: regra que
 depende do projeto inteiro fica para o CI.
 
@@ -175,6 +176,10 @@ LINGUAGENS = {
 # Medido em si mesmo (github-workflows#35): o MCP achou os 10 problemas comuns do
 # Sonar e nenhum dos 2 `pythonsecurity:*`, que sao analise de fluxo do servidor.
 NOTA_PYTHON = "em Python, a analise de fluxo de seguranca (pythonsecurity)"
+# O `analyze_code_snippet` so devolve issues, nunca security hotspots, e o portao
+# exige 100% dos hotspots novos revisados: medido no basalto#194, que reprovou por
+# dois S5852 (regex com backtracking) com zero problemas novos e este script limpo.
+NOTA_HOTSPOTS = "os security hotspots (o MCP so devolve issues)"
 C_E_CPP = "C/C++"
 SO_O_CI = {
     ".rs": "Rust",
@@ -945,6 +950,7 @@ def medir(
         resultado.notas.append(NOTA_PYTHON)
     if not alvos:
         return resultado
+    resultado.notas.append(NOTA_HOTSPOTS)
     cliente = abrir_cliente(servidor, prazo)
     for origem, versao in versoes.items():
         if versao and versao != cliente.versao:
