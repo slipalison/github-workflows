@@ -107,6 +107,8 @@ class McpFalso:
         self.chamadas: list[dict] = []
         self.buscas: list[dict] = []  # os argumentos de search_sonar_issues_in_projects
         self.do_servidor: list[dict] = []  # o que o servidor "tem aberto"
+        self.projetos_cloud: list[str] = []  # o que search_my_sonarqube_projects acha
+        self.consultas: list[dict] = []  # os argumentos de search_my_sonarqube_projects
         self.autorizacoes: list[str | None] = []
         servidor = self
 
@@ -176,7 +178,11 @@ class McpFalso:
             return self.json(tratador, {"jsonrpc": "2.0", "id": pedido["id"], "error": erro})
         else:
             argumentos = pedido["params"]["arguments"]
-            if pedido["params"]["name"] == "search_sonar_issues_in_projects":
+            if pedido["params"]["name"] == "search_my_sonarqube_projects":
+                self.consultas.append(argumentos)
+                achados = [{"key": k} for k in self.projetos_cloud if k == argumentos.get("q")]
+                texto = json.dumps({"projects": achados})
+            elif pedido["params"]["name"] == "search_sonar_issues_in_projects":
                 self.buscas.append(argumentos)
                 texto = json.dumps(self.pagina(argumentos))
             else:
@@ -215,6 +221,10 @@ def do_servidor(arquivo: str, linha: int, regra: str, status: str = "OPEN") -> d
         "status": status,
         "textRange": {"startLine": linha},
     }
+
+
+def dorme(_repo: Path) -> None:
+    time.sleep(4)
 
 
 def porta_fechada() -> str:
@@ -271,18 +281,26 @@ class Oficina:
         self.git("add", "-A")
         self.git("commit", "-q", "-m", mensagem)
 
-    def ambiente(self, url: str) -> dict[str, str]:
-        return {"SONAR_LOCAL_URL": url, "SONAR_LOCAL_HELPER": str(self.helper)}
+    def ambiente(self, url: str, visibilidade: str = "privado") -> dict[str, str]:
+        return {
+            "SONAR_LOCAL_URL": url,
+            "SONAR_LOCAL_HELPER": str(self.helper),
+            "SONAR_LOCAL_VISIBILIDADE": visibilidade,
+        }
 
     def rodar(
-        self, url: str, *argumentos: str, entrada: str | None = None
+        self,
+        url: str,
+        *argumentos: str,
+        entrada: str | None = None,
+        visibilidade: str = "privado",
     ) -> subprocess.CompletedProcess:
         return subprocess.run(
             [sys.executable, str(SCRIPT), "--repo", str(self.raiz), *argumentos],
             capture_output=True,
             text=True,
             input=entrada,
-            env={**os.environ, **self.ambiente(url)},
+            env={**os.environ, **self.ambiente(url, visibilidade)},
             timeout=60,
         )
 
@@ -770,7 +788,9 @@ class Hook(Base):
             mock.patch.dict(os.environ, o.ambiente(mcp.url)),
         ):
             inicio = time.monotonic()
-            codigo = sonar_local.main(["--hook"], io.StringIO(self.entrada(o, "src/a.ts")))
+            codigo = sonar_local.main(
+                ["--hook", "--repo", str(o.raiz)], io.StringIO(self.entrada(o, "src/a.ts"))
+            )
             gasto = time.monotonic() - inicio
         self.assertEqual(codigo, 0)
         self.assertLess(gasto, 4)
@@ -780,27 +800,224 @@ class Hook(Base):
         o.escrever("src/a.ts", "// TODO de novo\n" + BASE_A)
         with (
             mock.patch.object(sonar_local, "PRAZO_HOOK_S", 1.0),
-            mock.patch.object(sonar_local, "descobrir", lambda _repo: time.sleep(4)),
+            mock.patch.object(sonar_local, "descobrir", side_effect=dorme),
         ):
             inicio = time.monotonic()
-            codigo = sonar_local.main(["--hook"], io.StringIO(self.entrada(o, "src/a.ts")))
+            codigo = sonar_local.main(
+                ["--hook", "--repo", str(o.raiz)], io.StringIO(self.entrada(o, "src/a.ts"))
+            )
             gasto = time.monotonic() - inicio
         self.assertEqual(codigo, 0)
         self.assertLess(gasto, 3)
 
 
+SEM_SONAR = """\
+name: ci
+on: pull_request
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo oi
+"""
+_ferramenta_de_verdade = validar_local.ferramenta
+
+
+def ferramenta_falsa(nome: str):
+    """O yq e de verdade (o sonar_local o usa); o actionlint nao roda aqui."""
+    return _ferramenta_de_verdade(nome) if nome == "yq" else Path("/nada")
+
+
+# Sem `sonar.sources`: tudo e fonte, e e o que deixaria um caminho de fora passar.
+WORKFLOW_TUDO = WORKFLOW.replace("        sonar.sources=src\n", "").replace(
+    "        sonar.tests=src\n", ""
+)
+
+
+class Confinamento(Base):
+    """O que chega de fora (o JSON do hook e a linha de comando) fica no repositorio."""
+
+    def hook(self, o: Oficina, url: str, caminho: Path) -> subprocess.CompletedProcess:
+        entrada = json.dumps({"tool_input": {"file_path": str(caminho)}})
+        return o.rodar(url, "--hook", entrada=entrada)
+
+    def fora(self, o: Oficina) -> Path:
+        arquivo = Path(o.tmp.name) / "fora" / "x.ts"
+        arquivo.parent.mkdir()
+        arquivo.write_text("// TODO de fora do repositorio\n")
+        return arquivo
+
+    def test_o_hook_nao_le_arquivo_fora_do_repositorio(self):
+        o = self.oficina(WORKFLOW_TUDO)
+        fora = self.fora(o)
+        with McpFalso() as mcp:
+            processo = self.hook(o, mcp.url, fora)
+            traversal = self.hook(o, mcp.url, o.raiz / "src" / ".." / ".." / "fora" / "x.ts")
+            self.assertEqual(mcp.chamadas, [])
+        self.assertEqual((processo.returncode, processo.stderr), (0, ""))
+        self.assertEqual((traversal.returncode, traversal.stderr), (0, ""))
+
+    def test_o_hook_nao_segue_link_que_aponta_para_fora(self):
+        o = self.oficina(WORKFLOW_TUDO)
+        (o.raiz / "src" / "link.ts").symlink_to(self.fora(o))
+        with McpFalso() as mcp:
+            processo = self.hook(o, mcp.url, o.raiz / "src" / "link.ts")
+            self.assertEqual(mcp.chamadas, [])
+        self.assertEqual((processo.returncode, processo.stderr), (0, ""))
+
+    def test_o_hook_ainda_le_o_arquivo_de_dentro(self):
+        o = self.oficina(WORKFLOW_TUDO)
+        o.escrever("src/a.ts", "// TODO de novo\n" + BASE_A)
+        with McpFalso() as mcp:
+            processo = self.hook(o, mcp.url, o.raiz / "src" / "a.ts")
+        self.assertEqual(processo.returncode, 2, processo.stderr)
+
+    def test_saida_so_no_repositorio_ou_no_diretorio_temporario(self):
+        o = self.oficina()
+        for destino in ("/usr/share/sonar-local-teste.json", "../../../../usr/share/x.json"):
+            with self.subTest(destino), McpFalso() as mcp:
+                processo = o.rodar(mcp.url, "--calibrar", "--saida", destino)
+                self.assertEqual(processo.returncode, 2, processo.stdout)
+                self.assertIn("--saida fica dentro do repositorio", processo.stderr)
+                self.assertEqual(mcp.chamadas, [])
+        self.assertFalse(Path("/usr/share/sonar-local-teste.json").exists())
+
+    def test_saida_por_link_que_sai_do_diretorio_temporario_tambem_e_recusada(self):
+        o = self.oficina()
+        link = Path(o.tmp.name) / "link"
+        link.symlink_to("/usr/share")
+        with McpFalso() as mcp:
+            processo = o.rodar(mcp.url, "--calibrar", "--saida", str(link / "x.json"))
+        self.assertEqual(processo.returncode, 2, processo.stdout)
+        self.assertIn("--saida fica dentro do repositorio", processo.stderr)
+
+    def test_saida_dentro_do_repositorio_e_aceita(self):
+        o = self.oficina()
+        with McpFalso() as mcp:
+            processo = o.rodar(mcp.url, "--calibrar", "--saida", str(o.raiz / "cal.json"))
+        self.assertEqual(processo.returncode, 0, processo.stderr)
+        self.assertIn("nao_espelhadas", (o.raiz / "cal.json").read_text())
+
+    def test_somente_base_e_projeto_so_entram_no_formato_esperado(self):
+        o = self.oficina()
+        casos = (
+            (("--calibrar", "--somente", "../fora"), "--somente espera"),
+            (("--calibrar", "--somente", "/etc"), "--somente espera"),
+            (("--calibrar", "--somente", "src/../../fora"), "--somente espera"),
+            (("--base=--upload-pack=x",), "--base espera"),
+            (("--projeto", "a b;c"), "--projeto espera"),
+        )
+        with McpFalso() as mcp:
+            for argumentos, mensagem in casos:
+                with self.subTest(argumentos):
+                    processo = o.rodar(mcp.url, *argumentos)
+                    self.assertEqual(processo.returncode, 2, processo.stdout)
+                    self.assertIn(mensagem, processo.stderr)
+            self.assertEqual(mcp.chamadas, [])
+
+
+class ProjetoAutomatico(Base):
+    """Sem `sonar_projeto` e publico: `<dono>_<repo>`, se o SonarCloud o confirma."""
+
+    DISPENSADO = WORKFLOW.replace(
+        "      sonar_projeto: meu-projeto\n",
+        '      sonar_projeto: ""\n      sonar_dispensa: "analise automatica do SonarCloud"\n',
+    )
+
+    def medir(self, o: Oficina, mcp: McpFalso, visibilidade: str):
+        o.escrever("src/a.ts", "// TODO de novo\n" + BASE_A)
+        return o.rodar(mcp.url, visibilidade=visibilidade)
+
+    def test_publico_com_o_projeto_no_sonarcloud_e_medido(self):
+        o = self.oficina(self.DISPENSADO)
+        with McpFalso() as mcp:
+            mcp.projetos_cloud = ["exemplo_demo"]
+            processo = self.medir(o, mcp, "publico")
+            self.assertEqual({c["projectKey"] for c in mcp.chamadas}, {"exemplo_demo"})
+        self.assertEqual(processo.returncode, 1, processo.stderr)
+        self.assertIn("src/a.ts:1 typescript:S1135", processo.stdout)
+
+    def test_publico_sem_o_projeto_no_sonarcloud_nao_ha_o_que_medir(self):
+        o = self.oficina(self.DISPENSADO)
+        with McpFalso() as mcp:
+            processo = self.medir(o, mcp, "publico")
+            self.assertEqual(mcp.consultas, [{"q": "exemplo_demo"}])
+            self.assertEqual(mcp.chamadas, [])
+        self.assertEqual(processo.returncode, 0, processo.stderr)
+        self.assertIn("nao tem projeto Sonar", processo.stdout)
+
+    def test_privado_nem_pergunta_ao_sonarcloud(self):
+        o = self.oficina(self.DISPENSADO)
+        with McpFalso() as mcp:
+            mcp.projetos_cloud = ["exemplo_demo"]
+            processo = self.medir(o, mcp, "privado")
+            self.assertEqual(mcp.consultas, [])
+        self.assertEqual(processo.returncode, 0, processo.stderr)
+
+    def test_a_chave_do_workflow_vence_a_automatica(self):
+        o = self.oficina()
+        with McpFalso() as mcp:
+            mcp.projetos_cloud = ["exemplo_demo"]
+            self.medir(o, mcp, "publico")
+            self.assertEqual(mcp.consultas, [])
+            self.assertEqual({c["projectKey"] for c in mcp.chamadas}, {"meu-projeto"})
+
+
+class NotaDoPython(Base):
+    def test_arquivo_python_diz_que_a_analise_de_fluxo_so_o_ci_mede(self):
+        o = self.oficina(WORKFLOW_TUDO)
+        o.escrever("src/m.py", "x = 1\n")
+        with McpFalso() as mcp:
+            resultado = o.medir(mcp.url)
+        self.assertIn(
+            "so o CI mede, em Python, a analise de fluxo de seguranca", resultado.resumo()
+        )
+        self.assertEqual({c["language"] for c in mcp.chamadas}, {"py"})
+
+    def test_sem_python_a_nota_nao_aparece(self):
+        o = self.oficina()
+        o.escrever("src/a.ts", BASE_A.replace("return 1", "return 2"))
+        with McpFalso() as mcp:
+            self.assertNotIn("pythonsecurity", o.medir(mcp.url).resumo())
+
+
 class ValidarLocal(Base):
-    def rodada(self, o: Oficina, url: str, motivo: str | None = None, workflows_ok: bool = True):
-        args = argparse.Namespace(job=None, workflow=None, sem_sonar_local=motivo)
+    def rodada(
+        self,
+        o: Oficina,
+        url: str,
+        motivo: str | None = None,
+        workflows_ok: bool = True,
+        filtro: bool = False,
+        **opcoes,
+    ):
+        """A `validar` inteira, com o act trocado por um falso que conta as chamadas."""
+        args = argparse.Namespace(
+            job="ci" if filtro else None,
+            workflow=None,
+            listar=False,
+            esteira_local=False,
+            sem_sonar_local=motivo,
+            **opcoes,
+        )
         arvore = o.git("rev-parse", "HEAD^{tree}")
+        self.act = mock.Mock(
+            return_value={"ci.yml": {"job": "passou" if workflows_ok else "falhou"}}
+        )
         saida = io.StringIO()
         with (
             mock.patch.dict(os.environ, o.ambiente(url)),
             contextlib.redirect_stdout(saida),
+            mock.patch.object(validar_local, "maquina_pronta", return_value=None),
+            mock.patch.object(validar_local, "travar_a_maquina", return_value=object()),
+            mock.patch.object(validar_local, "limpar_rodadas_do_act", return_value=0),
+            mock.patch.object(validar_local, "preparar_esteira", return_value=(o.raiz, 1)),
+            mock.patch.object(validar_local, "segredos", return_value=({}, {})),
+            mock.patch.object(validar_local, "ferramenta", ferramenta_falsa),
+            mock.patch.object(validar_local, "lint", return_value=True),
+            mock.patch.object(validar_local, "rodar_workflows", self.act),
         ):
-            codigo = validar_local.fechar(
-                args, o.raiz, arvore, "", {"ci.yml": {"job": "passou"}}, 0.1, workflows_ok
-            )
+            codigo = validar_local.validar(args, o.raiz, arvore, "")
         registrado = (validar_local.registro(o.raiz) / arvore).is_file()
         texto = saida.getvalue()
         self.assertNotIn(CANARIO, texto)
@@ -818,7 +1035,9 @@ class ValidarLocal(Base):
             codigo, registrado, texto, _ = self.rodada(o, mcp.url)
         self.assertEqual((codigo, registrado), (1, False), texto)
         self.assertIn("src/a.ts:1 typescript:S1135", texto)
-        self.assertIn("REPROVADO", texto)
+        self.assertIn("REPROVADO antes dos workflows", texto)
+        self.assertIn("sonar_local.py` ate sair 0", texto)
+        self.act.assert_not_called()
 
     def test_limpo_registra_e_diz_o_que_foi_medido_e_o_que_so_o_ci_mede(self):
         o = self.oficina()
@@ -828,7 +1047,10 @@ class ValidarLocal(Base):
         with McpFalso() as mcp:
             codigo, registrado, texto, arvore = self.rodada(o, mcp.url)
         self.assertEqual((codigo, registrado), (0, True), texto)
+        self.act.assert_called_once()
+        self.assertEqual(len(mcp.chamadas), 2, "o Sonar local e medido uma vez so")
         self.assertIn("Sonar local: 0 problemas novos em 1 arquivo; 1 so o CI mede (Rust 1)", texto)
+        self.assertLess(texto.index("Sonar local:"), texto.index("Resumo"))
         self.assertIn("So o CI mede: Rust, cobertura do codigo novo e duplicacao", texto)
         self.assertNotIn("o Sonar so o CI mede", texto)
         self.assertIn("Sonar local 0 novos", (validar_local.registro(o.raiz) / arvore).read_text())
@@ -840,6 +1062,7 @@ class ValidarLocal(Base):
         self.assertIn("nao consegui medir", texto)
         self.assertIn("docker start sonarqube-homelab-mcp", texto)
         self.assertIn("--sem-sonar-local", texto)
+        self.act.assert_not_called()
 
     def test_sem_sonar_local_com_motivo_registra_e_o_motivo_aparece(self):
         o = self.com_problema()
@@ -847,6 +1070,7 @@ class ValidarLocal(Base):
             o, porta_fechada(), motivo="MCP da Sonar em manutencao"
         )
         self.assertEqual((codigo, registrado), (0, True), texto)
+        self.act.assert_called_once()
         self.assertIn("DISPENSADO", texto)
         self.assertIn("MCP da Sonar em manutencao", texto)
         registro = (validar_local.registro(o.raiz) / arvore).read_text()
@@ -857,6 +1081,7 @@ class ValidarLocal(Base):
         with McpFalso() as mcp:
             codigo, registrado, texto, _ = self.rodada(o, mcp.url, motivo="quero passar")
         self.assertEqual((codigo, registrado), (1, False), texto)
+        self.act.assert_not_called()
 
     def test_o_aviso_das_regras_calibradas_aparece_e_a_rodada_passa(self):
         o = self.oficina()
@@ -870,15 +1095,24 @@ class ValidarLocal(Base):
         self.assertEqual((codigo, registrado), (0, True), texto)
         self.assertIn("aviso, o CI decide: S1135 \u00d71", texto)
 
-    def test_workflow_vermelho_nao_chega_ao_sonar(self):
+    def test_workflow_vermelho_nao_registra_mesmo_com_o_sonar_limpo(self):
+        o = self.oficina()
+        o.escrever("src/a.ts", BASE_A.replace("return 1", "return 2"))
+        o.commitar("limpo")
+        with McpFalso() as mcp:
+            codigo, registrado, texto, _ = self.rodada(o, mcp.url, workflows_ok=False)
+        self.assertEqual((codigo, registrado), (1, False), texto)
+        self.act.assert_called_once()
+
+    def test_com_filtro_o_sonar_local_roda_primeiro_do_mesmo_jeito(self):
         o = self.com_problema()
         with McpFalso() as mcp:
-            codigo, registrado, _, _ = self.rodada(o, mcp.url, workflows_ok=False)
-            self.assertEqual(mcp.chamadas, [])
-        self.assertEqual((codigo, registrado), (1, False))
+            codigo, registrado, texto, _ = self.rodada(o, mcp.url, filtro=True)
+        self.assertEqual((codigo, registrado), (1, False), texto)
+        self.act.assert_not_called()
 
     def test_repositorio_sem_projeto_sonar_registra(self):
-        o = self.oficina(workflow=None)
+        o = self.oficina(workflow=SEM_SONAR)
         o.escrever("src/a.ts", "// TODO\n")
         o.commitar("sem sonar")
         codigo, registrado, texto, _ = self.rodada(o, porta_fechada())
@@ -916,7 +1150,7 @@ ISCAS = [
     ),
     _s(
         "sonar_local.py",
-        "candidatas.remove(min(candidatas, key=lambda linha: abs(linha - atual.linha)))",
+        "candidatas.remove(a_mais_proxima(candidatas, atual.linha))",
         "pass",
         "Novos.test_o_mesmo_problema_de_novo_e_novo",
         "um problema da base casa com varios",
@@ -1065,14 +1299,14 @@ ISCAS = [
     ),
     _s(
         "sonar_local.py",
-        "if sufixo(problema.regra) in ignoradas:",
-        "if sufixo(problema.regra) in set():",
+        "if regra in ignoradas:",
+        "if regra in set():",
         "Calibracao.test_o_hook_nao_devolve_ao_agente_a_regra_listada",
         "o hook devolve a regra calibrada ao agente",
     ),
     _s(
         "sonar_local.py",
-        "if sufixo(problema.regra) in ignoradas:",
+        "if regra in ignoradas:",
         "if True:",
         "Calibracao.test_regra_listada_nao_reprova_e_vira_aviso_so_a_listada",
         "toda regra vira aviso, e nao so a listada",
@@ -1139,6 +1373,97 @@ ISCAS = [
     ),
     _s(
         "sonar_local.py",
+        "        if os.path.commonpath([base, real]) == base:",
+        "        if True:",
+        "Confinamento.test_o_hook_nao_le_arquivo_fora_do_repositorio",
+        "o hook le arquivo fora do repositorio (e o diff do `medir` tambem deixa)",
+        extra=(
+            (
+                "sonar_local.py",
+                "arquivos = [par for par in arquivos if par[0] == apenas]",
+                "arquivos = [(apenas, apenas)]",
+            ),
+        ),
+    ),
+    _s(
+        "sonar_local.py",
+        "    real = os.path.realpath(caminho)\n",
+        "    real = os.path.abspath(caminho)\n",
+        "Confinamento.test_o_hook_nao_segue_link_que_aponta_para_fora",
+        "o hook segue link para fora (e `separar` tambem deixa)",
+        extra=(
+            (
+                "sonar_local.py",
+                "if escopo is None or arquivo.is_symlink() or",
+                "if escopo is None or",
+            ),
+        ),
+    ),
+    _s(
+        "sonar_local.py",
+        "    real = confinar(args.saida, [str(repo), tempfile.gettempdir()])\n",
+        "    real = os.path.realpath(args.saida)\n",
+        "Confinamento.test_saida_so_no_repositorio_ou_no_diretorio_temporario",
+        "--saida grava onde a pessoa mandar",
+    ),
+    _s(
+        "sonar_local.py",
+        "    real = os.path.realpath(caminho)\n",
+        "    real = os.path.abspath(caminho)\n",
+        "Confinamento.test_saida_por_link_que_sai_do_diretorio_temporario_tambem_e_recusada",
+        "o link para fora do temporario passa",
+    ),
+    _s(
+        "sonar_local.py",
+        'if os.path.isabs(normal) or normal == ".." or normal.startswith(".." + os.sep):',
+        "if False:",
+        "Confinamento.test_somente_base_e_projeto_so_entram_no_formato_esperado",
+        "--somente aceita caminho de fora",
+    ),
+    _s(
+        "sonar_local.py",
+        "if args.base and not REF_SEGURA.fullmatch(args.base):",
+        "if False:",
+        "Confinamento.test_somente_base_e_projeto_so_entram_no_formato_esperado",
+        "--base aceita o que o git le como opcao",
+    ),
+    _s(
+        "sonar_local.py",
+        "if args.projeto and not CHAVE_SEGURA.fullmatch(args.projeto):",
+        "if False:",
+        "Confinamento.test_somente_base_e_projeto_so_entram_no_formato_esperado",
+        "--projeto aceita qualquer texto",
+    ),
+    _s(
+        "sonar_local.py",
+        'if not (dono and nome) or visibilidade_privada(f"{dono}/{nome}"):',
+        "if not (dono and nome):",
+        "ProjetoAutomatico.test_privado_nem_pergunta_ao_sonarcloud",
+        "o repositorio privado procura projeto no SonarCloud",
+    ),
+    _s(
+        "sonar_local.py",
+        "if not existe_no_sonarcloud(chave, prazo or Prazo(None)):",
+        "if False:",
+        "ProjetoAutomatico.test_publico_sem_o_projeto_no_sonarcloud_nao_ha_o_que_medir",
+        "usa a chave sem o SonarCloud confirmar que ela existe",
+    ),
+    _s(
+        "sonar_local.py",
+        "    if projeto is not None and projeto.chave:\n        return projeto\n    try:",
+        "    if False:\n        return projeto\n    try:",
+        "ProjetoAutomatico.test_a_chave_do_workflow_vence_a_automatica",
+        "a chave automatica vence a do workflow",
+    ),
+    _s(
+        "sonar_local.py",
+        "        resultado.notas.append(NOTA_PYTHON)",
+        "        pass",
+        "NotaDoPython.test_arquivo_python_diz_que_a_analise_de_fluxo_so_o_ci_mede",
+        "Python nao diz que o fluxo de seguranca so o CI mede",
+    ),
+    _s(
+        "sonar_local.py",
         "    signal.alarm(max(1, int(PRAZO_HOOK_S)))\n",
         "",
         "Hook.test_o_alarme_do_hook_corta_o_que_nao_e_chamada_ao_mcp",
@@ -1154,10 +1479,33 @@ ISCAS = [
     ),
     _s(
         "validar_local.py",
-        "        ok = sonar_ok and ok\n",
-        "        ok = ok\n",
+        "    if not sonar_ok:\n        diz(",
+        "    if False:\n        diz(",
         "ValidarLocal.test_com_problema_novo_a_rodada_fica_vermelha_e_nao_registra",
-        "a rodada registra com problema novo",
+        "problema novo nao para a rodada",
+    ),
+    _s(
+        "validar_local.py",
+        "    sonar_ok, feito_sonar = medir_sonar(repo, args)\n    if not sonar_ok:",
+        '    sonar_ok, feito_sonar = True, ""\n    if not sonar_ok:',
+        "ValidarLocal.test_com_problema_novo_a_rodada_fica_vermelha_e_nao_registra",
+        "o Sonar local nao e medido antes dos workflows",
+    ),
+    _s(
+        "validar_local.py",
+        '    feito = ", ".join([*resultado, feito_sonar])',
+        '    feito = ", ".join(resultado)',
+        "ValidarLocal.test_limpo_registra_e_diz_o_que_foi_medido_e_o_que_so_o_ci_mede",
+        "o registro esquece o que o Sonar local mediu",
+    ),
+    _s(
+        "validar_local.py",
+        "    return fechar(args, repo, arvore, antes, resultado, minutos, ok, feito_sonar)",
+        "    return fechar(\n"
+        "        args, repo, arvore, antes, resultado, minutos, ok, medir_sonar(repo, args)[1]\n"
+        "    )",
+        "ValidarLocal.test_limpo_registra_e_diz_o_que_foi_medido_e_o_que_so_o_ci_mede",
+        "o Sonar local e medido de novo no fim",
     ),
     _s(
         "validar_local.py",
@@ -1179,13 +1527,6 @@ ISCAS = [
         '        return True, ""\n    if nao_mediu is None:',
         "ValidarLocal.test_sem_sonar_local_nao_perdoa_problema_novo",
         "problema novo passa",
-    ),
-    _s(
-        "validar_local.py",
-        "    if ok:\n        sonar_ok, feito_sonar = medir_sonar(repo, args)",
-        "    if True:\n        sonar_ok, feito_sonar = medir_sonar(repo, args)",
-        "ValidarLocal.test_workflow_vermelho_nao_chega_ao_sonar",
-        "o Sonar roda com o workflow vermelho",
     ),
 ]
 

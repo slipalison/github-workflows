@@ -103,6 +103,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -122,7 +123,7 @@ ENTRADAS_DO_CI = ("pipeline", "sonar")
 REGRA_CLOUD = re.compile(r"sonarcloud\.io|sonarqube\.com")
 # A faixa privada que o sonar.yml entende como "so a tailnet alcanca".
 REGRA_PRIVADA = re.compile(
-    r"^https?://(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.)"
+    r"^https?://(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)"
 )
 CHAMADOR = re.compile(r"github-workflows/\.github/workflows/(pipeline|sonar)\.ya?ml")
 
@@ -168,14 +169,18 @@ LINGUAGENS = {
     ".vue": "vue",
 }
 # O que o Sonar do CI analisa e o MCP nao: conta em "so o CI mede".
+# Medido em si mesmo (github-workflows#35): o MCP achou os 10 problemas comuns do
+# Sonar e nenhum dos 2 `pythonsecurity:*`, que sao analise de fluxo do servidor.
+NOTA_PYTHON = "em Python, a analise de fluxo de seguranca (pythonsecurity)"
+C_E_CPP = "C/C++"
 SO_O_CI = {
     ".rs": "Rust",
     ".cs": "C#",
     ".swift": "Swift",
     ".scala": "Scala",
-    ".c": "C/C++",
-    ".cpp": "C/C++",
-    ".h": "C/C++",
+    ".c": C_E_CPP,
+    ".cpp": C_E_CPP,
+    ".h": C_E_CPP,
     ".sh": "Shell",
     ".ps1": "PowerShell",
     ".sql": "SQL",
@@ -338,13 +343,15 @@ def chamadores(repo: Path) -> list[Projeto]:
     return achados
 
 
+def propriedades_do_repo(repo: Path) -> dict[str, str]:
+    arquivo = repo / "sonar-project.properties"
+    return ler_propriedades(arquivo.read_text(errors="replace")) if arquivo.is_file() else {}
+
+
 def descobrir(repo: Path) -> Projeto | None:
     """O projeto Sonar do repositorio. Chave vazia: o workflow o dispensou. None: nao
     ha chamador da esteira nem sonar-project.properties."""
-    propriedades: dict[str, str] = {}
-    arquivo = repo / "sonar-project.properties"
-    if arquivo.is_file():
-        propriedades = ler_propriedades(arquivo.read_text(errors="replace"))
+    propriedades = propriedades_do_repo(repo)
     achados = chamadores(repo)
     if achados:
         projeto = next((p for p in achados if p.chave), None)
@@ -367,6 +374,13 @@ def dono_e_repo(repo: Path) -> str:
     return re.sub(r"(\.git)?$", "", nome.split("github.com")[-1].lstrip(":/"))
 
 
+def visibilidade_privada(dono_repo: str) -> bool:
+    forcada = os.environ.get("SONAR_LOCAL_VISIBILIDADE")  # dos testes: privado | publico
+    if forcada in ("privado", "publico"):
+        return forcada == "privado"
+    return _validar().privado(dono_repo)
+
+
 def escolher_servidor(projeto: Projeto, repo: Path, privado=None) -> str:
     """homelab ou cloud, como o pipeline.yml: `sonar_host` explicito vence, e sem
     ele a visibilidade do repositorio (privado vai para o homelab)."""
@@ -378,7 +392,7 @@ def escolher_servidor(projeto: Projeto, repo: Path, privado=None) -> str:
         raise NaoMediu(
             f"o host Sonar {projeto.host} nao tem MCP nesta caixa (so o homelab e a Cloud)"
         )
-    decide = privado or _validar().privado
+    decide = privado or visibilidade_privada
     return "homelab" if decide(dono_e_repo(repo)) else "cloud"
 
 
@@ -553,7 +567,7 @@ class ClienteMcp:
             # So o codigo: o objeto do erro guarda os cabecalhos do pedido.
             dica = " (token recusado)" if erro.code in (401, 403) else ""
             raise NaoMediu(f"o MCP respondeu HTTP {erro.code}{dica}") from None
-        except (OSError, TimeoutError):
+        except OSError:
             raise NaoMediu(f"nao consegui falar com o MCP em {self.url}") from None
         corpo = _corpo(texto, tipo, mensagem.get("id"))
         if "error" in corpo:
@@ -668,6 +682,10 @@ def achados_de(issues: list[dict], conteudo: str) -> list[Achado]:
     return saida
 
 
+def a_mais_proxima(linhas: list[int], linha: int) -> int:
+    return min(linhas, key=lambda candidata: abs(candidata - linha))
+
+
 def so_os_novos(atuais: list[Achado], da_base: list[Achado]) -> list[Achado]:
     """O que a base nao tinha. Cada problema da base casa com UM da versao
     atual (o de linha mais proxima): um segundo igual e novo."""
@@ -678,7 +696,7 @@ def so_os_novos(atuais: list[Achado], da_base: list[Achado]) -> list[Achado]:
     for atual in sorted(atuais, key=lambda a: a.linha):
         candidatas = livres.get(atual.chave)
         if candidatas:
-            candidatas.remove(min(candidatas, key=lambda linha: abs(linha - atual.linha)))
+            candidatas.remove(a_mais_proxima(candidatas, atual.linha))
         else:
             novos.append(atual)
     return novos
@@ -711,6 +729,7 @@ class Resultado:
     so_o_ci: collections.Counter = field(default_factory=collections.Counter)
     nao_medidos: list[str] = field(default_factory=list)
     avisos: collections.Counter = field(default_factory=collections.Counter)
+    notas: list[str] = field(default_factory=list)  # o que o MCP nao ve, e so o CI mede
     sem_projeto: bool = False
     motivo_sem_projeto: str = ""
 
@@ -734,6 +753,8 @@ class Resultado:
             medido += f"; {sum(self.so_o_ci.values())} so o CI mede ({fora})"
         if self.nao_medidos:
             medido += f"; {len(self.nao_medidos)} sem medir"
+        for nota in self.notas:
+            medido += f"; so o CI mede, {nota}"
         return medido
 
     def aviso(self) -> str:
@@ -799,6 +820,60 @@ def separar(
     return alvos, so_o_ci
 
 
+def abrir_cliente(servidor: str, prazo: Prazo) -> ClienteMcp:
+    cliente = ClienteMcp(servidor, prazo)
+    try:
+        cliente.iniciar()
+    except NaoMediu as erro:
+        raise NaoMediu(f"{erro}. Suba o MCP: {cliente.como_subir}") from None
+    return cliente
+
+
+def existe_no_sonarcloud(chave: str, prazo: Prazo) -> bool:
+    try:
+        cliente = abrir_cliente("cloud", prazo)
+        dados = cliente.chamar("search_my_sonarqube_projects", {"q": chave})
+    except NaoMediu:
+        return False
+    return any(isinstance(p, dict) and p.get("key") == chave for p in dados.get("projects") or [])
+
+
+def projeto_do_repo(
+    repo: Path, forcado: Projeto | None = None, prazo: Prazo | None = None
+) -> Projeto | None:
+    """O projeto Sonar a medir. Sem chave no workflow (analise automatica do
+    SonarCloud, ou sem chamador) e com o repositorio publico, `<dono>_<repo>` se o
+    MCP do SonarCloud confirmar que ele existe."""
+    projeto = forcado or descobrir(repo)
+    if projeto is not None and projeto.chave:
+        return projeto
+    try:
+        dono, _, nome = dono_e_repo(repo).partition("/")
+    except NaoMediu:
+        return projeto
+    if not (dono and nome) or visibilidade_privada(f"{dono}/{nome}"):
+        return projeto
+    chave = f"{dono}_{nome}"
+    if not existe_no_sonarcloud(chave, prazo or Prazo(None)):
+        return projeto
+    return Projeto(
+        chave, "", {**propriedades_do_repo(repo), **(projeto.parametros if projeto else {})}
+    )
+
+
+def _somar(resultado: Resultado, alvo: Alvo, saida: list[Problema] | str, ignoradas: set[str]):
+    if isinstance(saida, str):
+        resultado.nao_medidos.append(f"{alvo.caminho}: {saida}")
+        return
+    resultado.analisados += 1
+    for problema in saida:
+        regra = sufixo(problema.regra)
+        if regra in ignoradas:
+            resultado.avisos[regra] += 1
+        else:
+            resultado.novos.append(problema)
+
+
 def medir(
     repo: Path,
     projeto: Projeto,
@@ -815,13 +890,11 @@ def medir(
         arquivos = [par for par in arquivos if par[0] == apenas]
     alvos, so_o_ci = separar(repo, arquivos, padroes(projeto.parametros))
     resultado = Resultado(so_o_ci=so_o_ci)
+    if any(alvo.linguagem == "py" for alvo in alvos):
+        resultado.notas.append(NOTA_PYTHON)
     if not alvos:
         return resultado
-    cliente = ClienteMcp(servidor, prazo)
-    try:
-        cliente.iniciar()
-    except NaoMediu as erro:
-        raise NaoMediu(f"{erro}. Suba o MCP: {cliente.como_subir}") from None
+    cliente = abrir_cliente(servidor, prazo)
 
     def um(alvo: Alvo) -> tuple[Alvo, list[Problema] | str]:
         try:
@@ -831,21 +904,13 @@ def medir(
 
     with concurrent.futures.ThreadPoolExecutor(PARALELO) as pool:
         for alvo, saida in pool.map(um, alvos):
-            if isinstance(saida, str):
-                resultado.nao_medidos.append(f"{alvo.caminho}: {saida}")
-            else:
-                resultado.analisados += 1
-                for problema in saida:
-                    if sufixo(problema.regra) in ignoradas:
-                        resultado.avisos[sufixo(problema.regra)] += 1
-                    else:
-                        resultado.novos.append(problema)
+            _somar(resultado, alvo, saida, ignoradas)
     return resultado
 
 
 def rodar(repo: Path, ref: str | None = None, projeto_forcado: Projeto | None = None) -> Resultado:
     """O PR inteiro. NaoMediu se nao deu para decidir nem o projeto nem o servidor."""
-    projeto = projeto_forcado or descobrir(repo)
+    projeto = projeto_do_repo(repo, projeto_forcado)
     if projeto is None or not projeto.chave:
         return Resultado(sem_projeto=True, motivo_sem_projeto=projeto.dispensa if projeto else "")
     return medir(repo, projeto, escolher_servidor(projeto, repo), ref)
@@ -923,6 +988,28 @@ def classificar_regras(
     }
 
 
+def alvos_da_ref(repo: Path, ref: str, p: Padroes, somente: tuple[str, ...]) -> list[Alvo]:
+    alvos = []
+    for caminho in filter(None, git(repo, "ls-tree", "-r", "-z", "--name-only", ref).split("\0")):
+        escopo, linguagem = classificar(caminho, p), linguagem_de(caminho)
+        if escopo and linguagem and (not somente or caminho.startswith(tuple(somente))):
+            alvos.append(Alvo(caminho, None, escopo, linguagem))
+    return alvos
+
+
+def achados_na_ref(
+    cliente: ClienteMcp, repo: Path, ref: str, chave: str, alvo: Alvo
+) -> tuple[list[tuple[str, int, str]], str | None]:
+    conteudo = texto_da_base(repo, ref, alvo.caminho)
+    if conteudo is None or "\0" in conteudo or len(conteudo) > LIMITE_ARQUIVO:
+        return [], None
+    try:
+        issues = cliente.analisar(conteudo, alvo.linguagem, chave, alvo.escopo)
+    except NaoMediu as erro:
+        return [], f"{alvo.caminho}: {erro}"
+    return [(alvo.caminho, a.linha, sufixo(a.regra)) for a in achados_de(issues, conteudo)], None
+
+
 def calibrar(
     repo: Path,
     projeto: Projeto,
@@ -933,38 +1020,19 @@ def calibrar(
 ) -> dict:
     """O `.sonar-local.json`: o que o MCP acusa na main e o servidor nao."""
     ref = ref_da_main(repo, ref)
-    p = padroes(projeto.parametros)
-    alvos = []
-    for caminho in filter(None, git(repo, "ls-tree", "-r", "-z", "--name-only", ref).split("\0")):
-        escopo, linguagem = classificar(caminho, p), linguagem_de(caminho)
-        if escopo and linguagem and (not somente or caminho.startswith(tuple(somente))):
-            alvos.append(Alvo(caminho, None, escopo, linguagem))
-    cliente = ClienteMcp(servidor, Prazo(None))
-    try:
-        cliente.iniciar()
-    except NaoMediu as erro:
-        raise NaoMediu(f"{erro}. Suba o MCP: {cliente.como_subir}") from None
+    alvos = alvos_da_ref(repo, ref, padroes(projeto.parametros), somente)
+    cliente = abrir_cliente(servidor, Prazo(None))
     do_servidor = issues_do_servidor(cliente, projeto.chave)
-
-    def um(alvo: Alvo) -> tuple[list[tuple[str, int, str]], str | None]:
-        conteudo = texto_da_base(repo, ref, alvo.caminho)
-        if conteudo is None or "\0" in conteudo or len(conteudo) > LIMITE_ARQUIVO:
-            return [], None
-        try:
-            issues = cliente.analisar(conteudo, alvo.linguagem, projeto.chave, alvo.escopo)
-        except NaoMediu as erro:
-            return [], f"{alvo.caminho}: {erro}"
-        return [
-            (alvo.caminho, a.linha, sufixo(a.regra)) for a in achados_de(issues, conteudo)
-        ], None
-
     do_mcp: list[tuple[str, int, str]] = []
     sem_medir: list[str] = []
+
+    def um(alvo: Alvo) -> tuple[list[tuple[str, int, str]], str | None]:
+        return achados_na_ref(cliente, repo, ref, projeto.chave, alvo)
+
     with concurrent.futures.ThreadPoolExecutor(PARALELO) as pool:
         for i, (achados, erro) in enumerate(pool.map(um, alvos), 1):
             do_mcp.extend(achados)
-            if erro:
-                sem_medir.append(erro)
+            sem_medir.extend([erro] if erro else [])
             if aviso and i % 25 == 0:
                 aviso(f"sonar-local: calibrando, {i}/{len(alvos)} arquivos")
     return {
@@ -1002,17 +1070,33 @@ def _estourou(*_: object) -> None:
     raise TimeoutError("prazo do hook")
 
 
-def hook(entrada) -> int:
-    """PostToolUse: so um arquivo, e edicao nunca trava por causa do MCP."""
+def confinar(caminho: str | Path, raizes: list[str]) -> str | None:
+    """O caminho real (links resolvidos) se ele fica DENTRO de uma das raizes, e
+    None se nao: um link que aponta para fora nao passa. `realpath` +
+    `commonpath`, a forma que o Sonar reconhece (S2083, S6549, S8707)."""
+    real = os.path.realpath(caminho)
+    for raiz in raizes:
+        base = os.path.realpath(raiz)
+        if os.path.commonpath([base, real]) == base:
+            return real
+    return None
+
+
+def hook(entrada, onde: Path) -> int:
+    """PostToolUse: so um arquivo DENTRO do repositorio, e edicao nunca trava por
+    causa do MCP. O repositorio e o do diretorio do hook (`--repo`, o atual), e nao
+    o que o arquivo diz: um `file_path` fora dele, ou um link para fora, sai 0."""
     prazo = Prazo(PRAZO_HOOK_S)
     # O `Prazo` corta as chamadas ao MCP; o alarme corta o resto (o yq, o `gh`).
     signal.signal(signal.SIGALRM, _estourou)
     signal.alarm(max(1, int(PRAZO_HOOK_S)))
     try:
-        caminho = Path(json.load(entrada)["tool_input"]["file_path"]).resolve()
-        repo = raiz_do_repo(caminho.parent)
-        relativo = caminho.relative_to(repo).as_posix()
-        projeto = descobrir(repo)
+        repo = raiz_do_repo(onde)
+        real = confinar(json.load(entrada)["tool_input"]["file_path"], [str(repo)])
+        if real is None:
+            return 0
+        relativo = Path(os.path.relpath(real, os.path.realpath(repo))).as_posix()
+        projeto = projeto_do_repo(repo, prazo=prazo)
         if projeto is None or not projeto.chave:
             return 0
         alvos, _ = separar(repo, [(relativo, relativo)], padroes(projeto.parametros))
@@ -1064,23 +1148,44 @@ def argumentos(argv: list[str] | None) -> argparse.Namespace:
     return ap.parse_args(argv)
 
 
+REF_SEGURA = re.compile(r"\w[\w./~^@{}-]*")
+CHAVE_SEGURA = re.compile(r"[\w.:-]+")
+
+
+def argumentos_seguros(args: argparse.Namespace, repo: Path) -> Path | None:
+    """O que vem da linha de comando so entra se for do tamanho que se espera: a
+    ref e a chave sao palavras (nada que o git leia como opcao), `--somente` e
+    relativo e fica dentro do repositorio, e `--saida` fica no repositorio ou no
+    diretorio temporario. Devolve o `--saida` ja confinado."""
+    if args.base and not REF_SEGURA.fullmatch(args.base):
+        raise NaoMediu(f"--base espera uma ref do git, e nao {args.base!r}")
+    if args.projeto and not CHAVE_SEGURA.fullmatch(args.projeto):
+        raise NaoMediu(f"--projeto espera uma chave Sonar, e nao {args.projeto!r}")
+    for prefixo in args.somente:
+        normal = os.path.normpath(prefixo)
+        if os.path.isabs(normal) or normal == ".." or normal.startswith(".." + os.sep):
+            raise NaoMediu(f"--somente espera um caminho dentro do repositorio: {prefixo!r}")
+    if not args.saida:
+        return None
+    real = confinar(args.saida, [str(repo), tempfile.gettempdir()])
+    if real is None:
+        raise NaoMediu("--saida fica dentro do repositorio ou do diretorio temporario")
+    return Path(real)
+
+
 def projeto_pedido(repo: Path, args: argparse.Namespace) -> Projeto | None:
     """`--projeto`: a chave vem de fora (o workflow a dispensa) e os parametros do
     sonar-project.properties. Sem ele, quem decide e o workflow chamador."""
     if not args.projeto:
         return None
-    propriedades = repo / "sonar-project.properties"
-    parametros = (
-        ler_propriedades(propriedades.read_text(errors="replace")) if propriedades.is_file() else {}
-    )
-    return Projeto(args.projeto, "", parametros)
+    return Projeto(args.projeto, "", propriedades_do_repo(repo))
 
 
-def rodar_calibragem(repo: Path, args: argparse.Namespace) -> int:
-    projeto = projeto_pedido(repo, args) or descobrir(repo)
+def rodar_calibragem(repo: Path, args: argparse.Namespace, saida: Path | None) -> None:
+    projeto = projeto_do_repo(repo, projeto_pedido(repo, args))
     if projeto is None or not projeto.chave:
         diz("sonar-local: este repositorio nao tem projeto Sonar: nada a calibrar", sys.stderr)
-        return 0
+        return
     calibragem = calibrar(
         repo,
         projeto,
@@ -1090,8 +1195,8 @@ def rodar_calibragem(repo: Path, args: argparse.Namespace) -> int:
         lambda texto: diz(texto, sys.stderr),
     )
     texto = json.dumps(calibragem, indent=2, ensure_ascii=False) + "\n"
-    if args.saida:
-        args.saida.write_text(texto)
+    if saida:
+        saida.write_text(texto)
     else:
         diz(texto.rstrip("\n"))
     diz(
@@ -1100,17 +1205,18 @@ def rodar_calibragem(repo: Path, args: argparse.Namespace) -> int:
         f"{len(calibragem['confiaveis'])} confiavel(is)",
         sys.stderr,
     )
-    return 0
 
 
 def main(argv: list[str] | None = None, entrada=None) -> int:
     args = argumentos(argv)
     if args.hook:
-        return hook(entrada or sys.stdin)
+        return hook(entrada or sys.stdin, args.repo)
     try:
         repo = raiz_do_repo(args.repo)
+        saida = argumentos_seguros(args, repo)
         if args.calibrar:
-            return rodar_calibragem(repo, args)
+            rodar_calibragem(repo, args, saida)
+            return 0
         resultado = rodar(repo, args.base, projeto_pedido(repo, args))
     except NaoMediu as erro:
         diz(f"sonar-local: nao consegui medir: {erro}", sys.stderr)

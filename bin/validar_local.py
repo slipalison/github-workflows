@@ -120,17 +120,21 @@ rodar, com o nome do workflow que o pede.
 SONAR LOCAL
 -----------
 O portao do SonarQube exige zero problemas novos, e PR verde aqui caia nele (e
-cada conserto custava outro run inteiro). Por isso, com todos os workflows
-verdes e ANTES de registrar a arvore, roda `bin/sonar_local.py`: os arquivos que
-o PR muda, analisados pelo MCP da Sonar desta caixa com o perfil de qualidade do
-projeto, e so o que a base (merge-base com origin/main) nao tinha conta. Problema
-novo reprova a rodada. Nao conseguir medir (MCP fora, sem token, projeto
-ilegivel) tambem reprova, com a instrucao de subir o MCP; so passa com
-`--sem-sonar-local "<motivo>"`, e o motivo vai para o resumo e para o registro.
-A opcao perdoa so o "nao mediu": problema novo continua reprovando. A regra que
-o `.sonar-local.json` do repositorio lista (o MCP a acusa, o servidor nao) sai
-como aviso, e nao reprova. Fica para o
-CI o que o MCP nao analisa (Rust), a cobertura do codigo novo e a duplicacao.
+cada conserto custava outro run inteiro). Por isso roda `bin/sonar_local.py`
+ANTES dos workflows: leva 1 a 2 min, contra ate 40 do act, e um "todo" num
+comentario nao pode esperar o fim da rodada. Vale tambem com -W e -j.
+
+Ele analisa os arquivos que o PR muda, pelo MCP da Sonar desta caixa e com o
+perfil de qualidade do projeto, e so o que a base (merge-base com origin/main)
+nao tinha conta. Problema novo para a rodada antes do primeiro workflow, com a
+lista. Nao conseguir medir (MCP fora, sem token, projeto ilegivel) tambem para,
+com a instrucao de subir o MCP; so passa com `--sem-sonar-local "<motivo>"`, e o
+motivo vai para o resumo e para o registro. A opcao perdoa so o "nao mediu":
+problema novo continua parando. A regra que o `.sonar-local.json` do repositorio
+lista (o MCP a acusa, o servidor nao) sai como aviso, e nao reprova. Se passar,
+os workflows rodam e o registro leva o que foi medido, sem medir de novo: a
+arvore e a mesma, e a rodada recusa arvore que mudou no meio. Fica para o CI o
+que o MCP nao analisa (Rust), a cobertura do codigo novo e a duplicacao.
 
 O REGISTRO
 ----------
@@ -1650,7 +1654,7 @@ def medir_sonar(repo: Path, args: argparse.Namespace) -> tuple[bool, str]:
         diz(f"  So o CI mede: {SO_O_CI} — e, desta vez, o Sonar inteiro.")
         return True, f"Sonar local dispensado ({motivo.strip()})"
     diz(f"  Sonar local: {VERMELHO}nao consegui medir{FIM}: {sonar.limpar(nao_mediu)}")
-    diz('  Sem medir, a rodada nao registra. Conserte, ou rode com --sem-sonar-local "<motivo>".')
+    diz('  Sem medir, a rodada nao comeca. Conserte, ou rode com --sem-sonar-local "<motivo>".')
     return False, ""
 
 
@@ -1827,14 +1831,25 @@ def validar(args: argparse.Namespace, repo: Path, arvore: str, antes: str) -> in
     if args.listar:
         return 0
 
+    # O Sonar local leva 1 a 2 min, e o act, ate 40: um "todo" num comentario nao
+    # pode esperar o fim da rodada para aparecer. A arvore e a mesma, e a rodada
+    # ja recusa arvore que mudou no meio (`arvore_intocada`).
     inicio = time.monotonic()
+    sonar_ok, feito_sonar = medir_sonar(repo, args)
+    if not sonar_ok:
+        diz(
+            f"\n{VERMELHO}REPROVADO{FIM} antes dos workflows: rode "
+            f"`python3 {ESTEIRA / 'bin' / 'sonar_local.py'}` ate sair 0, e so entao "
+            "o validar-local."
+        )
+        return 1
     ok = lint(ferramenta("actionlint"), repo)
     try:
         resultado = rodar_workflows(repo, escolhidos, args, raiz_esteira, valores, n)
     except ValueError as erro:
         return falha(str(erro))
     minutos = (time.monotonic() - inicio) / 60
-    return fechar(args, repo, arvore, antes, resultado, minutos, ok)
+    return fechar(args, repo, arvore, antes, resultado, minutos, ok, feito_sonar)
 
 
 def fechar(
@@ -1845,14 +1860,12 @@ def fechar(
     resultado: dict[str, dict[str, str]],
     minutos: float,
     ok: bool,
+    feito_sonar: str,
 ) -> int:
-    """Depois dos workflows: a arvore, o resumo, o Sonar local — e so entao o registro."""
+    """Depois dos workflows: a arvore, o resumo e o registro, que leva o que o Sonar
+    local mediu ANTES deles (a arvore e a mesma, entao nao se mede de novo)."""
     ok = arvore_intocada(repo, antes) and ok
     ok = resumir(resultado, minutos) and ok
-    feito_sonar = ""
-    if ok:
-        sonar_ok, feito_sonar = medir_sonar(repo, args)
-        ok = sonar_ok and ok
     if not ok:
         diz(f"\n{VERMELHO}REPROVADO{FIM}: conserte aqui antes de empurrar.")
         return 1
