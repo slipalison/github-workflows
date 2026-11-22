@@ -895,11 +895,16 @@ python3 /caminho/para/github-workflows/bin/validar_local.py --status   # o HEAD 
   `~/.config/<repositório>/*.env`. `GH_PACKAGES_TOKEN` é o token do `gh`.
 - **`actionlint` só nos workflows que mudaram** em relação à `main`: um aviso
   antigo não trava ninguém, e um novo não passa.
-- **Sonar local, antes do registro.** Com todos os workflows verdes, roda o
-  [`sonar_local.py`](bin/sonar_local.py) (seção abaixo). Problema novo reprova a
-  rodada; não conseguir medir também, a não ser com
-  `--sem-sonar-local "<motivo>"` (o motivo vai para o resumo e para o registro, e
-  a opção só perdoa o "não mediu", nunca o problema novo).
+- **Sonar local, antes dos workflows.** O
+  [`sonar_local.py`](bin/sonar_local.py) (seção abaixo) leva 1 a 2 min, e o `act`,
+  até 40: um "todo" num comentário não espera o fim da rodada. Roda primeiro (com
+  `-W` e `-j` também, porque custa pouco). Problema novo para a rodada antes do
+  primeiro workflow, com a lista e a dica "rode `sonar_local.py` até sair 0"; não
+  conseguir medir também, a não ser com `--sem-sonar-local "<motivo>"` (o motivo
+  vai para o resumo e para o registro, e a opção só perdoa o "não mediu", nunca o
+  problema novo). Se passar, os workflows rodam e o registro leva o que foi
+  medido, sem medir de novo: a árvore é a mesma, e a rodada recusa árvore que
+  mudou no meio.
 - **Registro.** Tudo verde, com a árvore commitada, grava
   `.git/validar-local/<árvore>`. É o que diz, no PR, que aquela árvore passou.
 
@@ -936,9 +941,11 @@ python3 /caminho/para/github-workflows/bin/sonar_local.py --projeto slipalison_c
   como base. Sem `sonar_host`, a visibilidade do repositório decide, como no
   `pipeline.yml`. `sonar.sources`, `sonar.exclusions`, `sonar.tests`,
   `sonar.test.inclusions` e `sonar.test.exclusions` dizem o que entra e se é
-  `TEST` ou `MAIN`. Sem projeto (ou com `sonar_projeto` vazio), diz que não há
-  Sonar e sai 0; `--projeto CHAVE` força a chave, para o repositório que mede por
-  análise automática do SonarCloud.
+  `TEST` ou `MAIN`. Sem `sonar_projeto` (análise automática do SonarCloud, ou sem
+  chamador) e com o repositório **público**, usa `<dono>_<repo>` se o MCP do
+  SonarCloud confirmar que o projeto existe (`search_my_sonarqube_projects`), e o
+  coluna e este repositório se medem sem opção. Sem isso, diz que não há Sonar e
+  sai 0; `--projeto CHAVE` força a chave.
 - **"Novo" como o Sonar rastreia, e não "linha alterada".** Cada arquivo que o PR
   muda (commitado, na árvore de trabalho ou não rastreado, a partir do
   merge-base com `origin/main`) é analisado na versão da base e na atual, e um
@@ -954,7 +961,10 @@ python3 /caminho/para/github-workflows/bin/sonar_local.py --projeto slipalison_c
 - **O que ele não mede, e o CI mede:** linguagem sem analisador no MCP (**Rust**,
   contado em "só o CI mede", nunca em silêncio), a cobertura do código novo e a
   duplicação. A análise é por arquivo: regra que precisa do projeto inteiro
-  também fica para o CI. Custa ~2 s por arquivo no SonarQube do homelab e mais no
+  também fica para o CI. **Em Python, a análise de fluxo de segurança
+  (`pythonsecurity:*`, como S6549 e S8707) é só do CI**: medido neste
+  repositório, o MCP achou os 10 problemas comuns de um PR e nenhum dos 2 de
+  fluxo; o resumo diz isso sempre que há arquivo Python. Custa ~2 s por arquivo no SonarQube do homelab e mais no
   SonarCloud; só os arquivos com problema são analisados duas vezes.
 - **Calibragem (`--calibrar`): o que o MCP acusa e o servidor não.** O
   `analyze_code_snippet` analisa o arquivo **sozinho**, sem `tsconfig` nem tipos,
@@ -975,6 +985,12 @@ python3 /caminho/para/github-workflows/bin/sonar_local.py --projeto slipalison_c
   código certo) e sai numa linha `aviso, o CI decide: S3735 ×2`. Sem o arquivo,
   tudo reprova como antes; um arquivo ilegível dá código 2, e nunca vira isenção.
   Refaça a calibragem quando subir a imagem do MCP ou o perfil do projeto.
+- **O que chega de fora fica dentro do repositório.** O `--hook` só lê o
+  `file_path` que fica DENTRO do repositório do diretório do hook (`--repo`, o
+  atual), por `os.path.realpath` + `os.path.commonpath`: caminho fora dele, ou
+  link que aponta para fora, sai 0 em silêncio. `--saida` fica no repositório ou
+  no diretório temporário, `--somente` é relativo e sem `..`, e `--base` e
+  `--projeto` só aceitam o formato de uma ref e de uma chave.
 - **Segredo.** O token vem do helper de headers da máquina, fica só em memória e
   só vai a `127.0.0.1` (outro destino é recusado, e o redirecionamento não é
   seguido). Nada dele sai em stdout, stderr, argumento ou arquivo, nem num erro
