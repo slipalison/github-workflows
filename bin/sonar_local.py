@@ -115,6 +115,8 @@ PRAZO_HOOK_S = 25.0
 PRAZO_CHAMADA_S = 120.0
 PARALELO = 3
 CALIBRACAO = ".sonar-local.json"
+ORIGEM_CENTRAL = "central"
+ESTEIRA = Path(__file__).resolve().parent.parent
 PAGINA_ISSUES = 500
 STATUS_ABERTOS = ["OPEN", "CONFIRMED"]
 LIMITE_ARQUIVO = 1_000_000
@@ -636,20 +638,46 @@ def sufixo(regra: str) -> str:
     return regra.rsplit(":", 1)[-1]
 
 
-def ler_calibracao(repo: Path) -> set[str]:
-    """As regras que o `.sonar-local.json` diz que o MCP acusa e o servidor nao."""
-    arquivo = repo / CALIBRACAO
-    if not arquivo.is_file():
-        return set()
+def pasta_central() -> Path:
+    """As calibragens centrais, por chave de projeto: `calibragem/<chave>.json` desta
+    esteira. Dependem do perfil do servidor e da imagem do MCP, e nao do
+    repositorio, e chegam a todo clone sem esperar a `main` dele."""
+    return Path(os.environ.get("SONAR_LOCAL_CALIBRAGEM") or ESTEIRA / "calibragem")
+
+
+def _ler_calibragem(arquivo: Path, origem: str) -> tuple[set[str], str]:
+    """(as regras de `nao_espelhadas`, a versao do MCP que a mediu)."""
     try:
-        regras = json.loads(arquivo.read_text())["nao_espelhadas"]
+        dados = json.loads(arquivo.read_text())
+        regras = dados["nao_espelhadas"]
         if not isinstance(regras, dict | list):
             raise TypeError
     except (ValueError, KeyError, TypeError):
         raise NaoMediu(
-            f"{CALIBRACAO} ilegivel: precisa de `nao_espelhadas` (rode --calibrar)"
+            f"{origem} ilegivel: precisa de `nao_espelhadas` (rode --calibrar)"
         ) from None
-    return {sufixo(str(regra)) for regra in regras}
+    return {sufixo(str(regra)) for regra in regras}, str(dados.get("versao_mcp") or "")
+
+
+def ler_calibracoes(repo: Path, chave: str) -> tuple[dict[str, str], dict[str, str]]:
+    """(regra -> de onde veio a excecao, origem -> versao do MCP gravada). A central
+    (`calibragem/<chave>.json`) e a do repositorio (`.sonar-local.json`) SOMAM: a
+    do repositorio nao substitui a central."""
+    fontes: list[tuple[Path, str]] = []
+    if CHAVE_SEGURA.fullmatch(chave):
+        central = pasta_central() / f"{chave}.json"
+        if central.is_file():
+            fontes.append((central, ORIGEM_CENTRAL))
+    local = repo / CALIBRACAO
+    if local.is_file():
+        fontes.append((local, CALIBRACAO))
+    origens: dict[str, list[str]] = {}
+    versoes: dict[str, str] = {}
+    for arquivo, origem in fontes:
+        regras, versoes[origem] = _ler_calibragem(arquivo, origem)
+        for regra in regras:
+            origens.setdefault(regra, []).append(origem)
+    return {regra: " + ".join(o) for regra, o in origens.items()}, versoes
 
 
 # ---------------------------------------------------------- o que e novo
@@ -728,6 +756,8 @@ class Resultado:
     so_o_ci: collections.Counter = field(default_factory=collections.Counter)
     nao_medidos: list[str] = field(default_factory=list)
     avisos: collections.Counter = field(default_factory=collections.Counter)
+    origens: dict[str, str] = field(default_factory=dict)  # regra -> de onde veio a excecao
+    recalibrar: list[str] = field(default_factory=list)
     notas: list[str] = field(default_factory=list)  # o que o MCP nao ve, e so o CI mede
     sem_projeto: bool = False
     motivo_sem_projeto: str = ""
@@ -754,13 +784,18 @@ class Resultado:
             medido += f"; {len(self.nao_medidos)} sem medir"
         for nota in self.notas:
             medido += f"; so o CI mede, {nota}"
+        for recalibrar in self.recalibrar:
+            medido += f"; {recalibrar}"
         return medido
 
     def aviso(self) -> str:
         """As regras que o MCP acusa e o servidor nao (`.sonar-local.json`): o CI decide."""
         if not self.avisos:
             return ""
-        regras = ", ".join(f"{regra} \u00d7{n}" for regra, n in sorted(self.avisos.items()))
+        regras = ", ".join(
+            f"{regra} \u00d7{n} ({self.origens.get(regra, '?')})"
+            for regra, n in sorted(self.avisos.items())
+        )
         return f"aviso, o CI decide: {regras}"
 
     def codigo(self) -> int:
@@ -860,7 +895,9 @@ def projeto_do_repo(
     )
 
 
-def _somar(resultado: Resultado, alvo: Alvo, saida: list[Problema] | str, ignoradas: set[str]):
+def _somar(
+    resultado: Resultado, alvo: Alvo, saida: list[Problema] | str, ignoradas: dict[str, str]
+):
     if isinstance(saida, str):
         resultado.nao_medidos.append(f"{alvo.caminho}: {saida}")
         return
@@ -869,6 +906,7 @@ def _somar(resultado: Resultado, alvo: Alvo, saida: list[Problema] | str, ignora
         regra = sufixo(problema.regra)
         if regra in ignoradas:
             resultado.avisos[regra] += 1
+            resultado.origens[regra] = ignoradas[regra]
         else:
             resultado.novos.append(problema)
 
@@ -882,7 +920,7 @@ def medir(
     prazo: Prazo | None = None,
 ) -> Resultado:
     prazo = prazo or Prazo(None)
-    ignoradas = ler_calibracao(repo)
+    ignoradas, versoes = ler_calibracoes(repo, projeto.chave)
     base = merge_base(repo, ref)
     arquivos = arquivos_mudados(repo, base)
     if apenas is not None:
@@ -894,6 +932,9 @@ def medir(
     if not alvos:
         return resultado
     cliente = abrir_cliente(servidor, prazo)
+    for origem, versao in versoes.items():
+        if versao and versao != cliente.versao:
+            resultado.recalibrar.append(f"calibracao de {versao}: recalibre ({origem})")
 
     def um(alvo: Alvo) -> tuple[Alvo, list[Problema] | str]:
         try:

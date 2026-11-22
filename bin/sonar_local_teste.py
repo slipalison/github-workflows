@@ -254,6 +254,7 @@ class Oficina:
         self.git("update-ref", "refs/remotes/origin/main", "HEAD")
         self.git("checkout", "-q", "-b", "feat")
         self.helper = self.criar_helper(CANARIO, 0)
+        self.central = Path(self.tmp.name) / "central"
 
     def criar_helper(self, token: str, codigo: int) -> Path:
         helper = Path(self.tmp.name) / f"helper{codigo}.sh"
@@ -286,7 +287,14 @@ class Oficina:
             "SONAR_LOCAL_URL": url,
             "SONAR_LOCAL_HELPER": str(self.helper),
             "SONAR_LOCAL_VISIBILIDADE": visibilidade,
+            "SONAR_LOCAL_CALIBRAGEM": str(self.central),
         }
+
+    def calibragem_central(self, chave: str, *regras: str, versao: str = "falso-1.0") -> None:
+        """Poe `calibragem/<chave>.json` na central (a pasta da esteira, nos testes)."""
+        self.central.mkdir(exist_ok=True)
+        corpo = {"versao_mcp": versao, "nao_espelhadas": {r: {"ocorrencias": 1} for r in regras}}
+        (self.central / f"{chave}.json").write_text(json.dumps(corpo))
 
     def rodar(
         self,
@@ -567,9 +575,11 @@ class Calibracao(Base):
             resultado = o.medir(mcp.url)
             processo = o.rodar(mcp.url)
         self.assertEqual(linhas_dos_novos(resultado), [("src/f.ts", 1, "typescript:S3776")])
-        self.assertEqual(resultado.aviso(), "aviso, o CI decide: S1135 \u00d71")
+        self.assertEqual(resultado.aviso(), "aviso, o CI decide: S1135 \u00d71 (.sonar-local.json)")
         self.assertEqual(processo.returncode, 1, processo.stderr)
-        self.assertIn("sonar-local: aviso, o CI decide: S1135 \u00d71", processo.stdout)
+        self.assertIn(
+            "sonar-local: aviso, o CI decide: S1135 \u00d71 (.sonar-local.json)", processo.stdout
+        )
         self.assertNotIn("S1135 Complete", processo.stdout)
 
     def test_so_a_regra_listada_o_codigo_sai_0(self):
@@ -604,6 +614,101 @@ class Calibracao(Base):
             processo = o.rodar(mcp.url)
         self.assertEqual(processo.returncode, 2, processo.stdout)
         self.assertIn(".sonar-local.json ilegivel", processo.stderr)
+
+
+class CalibragemCentral(Base):
+    """`calibragem/<chave>.json` da esteira, somada ao `.sonar-local.json` do repositorio."""
+
+    def com_todo_e_complexa(self) -> Oficina:
+        o = self.oficina()
+        o.escrever("src/a.ts", "// TODO de novo\n" + BASE_A)
+        o.escrever("src/f.ts", COMPLEXA)
+        return o
+
+    def test_a_calibragem_central_isenta_e_diz_que_veio_dela(self):
+        o = self.oficina()
+        o.calibragem_central("meu-projeto", "S1135")
+        o.escrever("src/a.ts", "// TODO de novo\n" + BASE_A)
+        with McpFalso() as mcp:
+            resultado = o.medir(mcp.url)
+        self.assertEqual((resultado.novos, resultado.codigo()), ([], 0))
+        self.assertEqual(resultado.aviso(), "aviso, o CI decide: S1135 \u00d71 (central)")
+
+    def test_sem_a_central_a_mesma_regra_reprova(self):
+        o = self.oficina()
+        o.calibragem_central("outro-projeto", "S1135")
+        o.escrever("src/a.ts", "// TODO de novo\n" + BASE_A)
+        with McpFalso() as mcp:
+            self.assertEqual(o.medir(mcp.url).codigo(), 1)
+
+    def test_a_do_repositorio_soma_e_nao_substitui_a_central(self):
+        o = self.com_todo_e_complexa()
+        o.calibragem_central("meu-projeto", "S1135")
+        o.escrever(sonar_local.CALIBRACAO, json.dumps({"nao_espelhadas": {"S3776": {}}}))
+        with McpFalso() as mcp:
+            resultado = o.medir(mcp.url)
+        self.assertEqual(resultado.novos, [])
+        self.assertEqual(
+            resultado.aviso(),
+            "aviso, o CI decide: S1135 \u00d71 (central), S3776 \u00d71 (.sonar-local.json)",
+        )
+
+    def test_so_a_central_deixa_a_regra_que_ela_nao_lista_reprovando(self):
+        o = self.com_todo_e_complexa()
+        o.calibragem_central("meu-projeto", "S1135")
+        with McpFalso() as mcp:
+            resultado = o.medir(mcp.url)
+        self.assertEqual(linhas_dos_novos(resultado), [("src/f.ts", 1, "typescript:S3776")])
+
+    def test_a_mesma_regra_nas_duas_diz_as_duas_origens(self):
+        o = self.oficina()
+        o.calibragem_central("meu-projeto", "S1135")
+        o.escrever(sonar_local.CALIBRACAO, json.dumps({"nao_espelhadas": {"S1135": {}}}))
+        o.escrever("src/a.ts", "// TODO de novo\n" + BASE_A)
+        with McpFalso() as mcp:
+            resultado = o.medir(mcp.url)
+        self.assertEqual(
+            resultado.aviso(), "aviso, o CI decide: S1135 \u00d71 (central + .sonar-local.json)"
+        )
+
+    def test_versao_diferente_da_imagem_avisa_e_nao_reprova(self):
+        o = self.oficina()
+        o.calibragem_central("meu-projeto", "S1135", versao="1.0.0.1")
+        o.escrever("src/a.ts", "// TODO de novo\n" + BASE_A)
+        with McpFalso() as mcp:
+            resultado = o.medir(mcp.url)
+            processo = o.rodar(mcp.url)
+        self.assertIn("calibracao de 1.0.0.1: recalibre (central)", resultado.resumo())
+        self.assertEqual(resultado.codigo(), 0)
+        self.assertEqual(processo.returncode, 0, processo.stderr)
+        self.assertIn("calibracao de 1.0.0.1: recalibre", processo.stdout)
+
+    def test_a_mesma_versao_nao_avisa(self):
+        o = self.oficina()
+        o.calibragem_central("meu-projeto", "S1135")
+        o.escrever("src/a.ts", "// TODO de novo\n" + BASE_A)
+        with McpFalso() as mcp:
+            self.assertNotIn("recalibre", o.medir(mcp.url).resumo())
+
+    def test_central_ilegivel_nao_vira_isencao(self):
+        o = self.oficina()
+        o.central.mkdir()
+        (o.central / "meu-projeto.json").write_text("{nao e json")
+        o.escrever("src/a.ts", "// TODO de novo\n" + BASE_A)
+        with McpFalso() as mcp:
+            processo = o.rodar(mcp.url)
+        self.assertEqual(processo.returncode, 2, processo.stdout)
+        self.assertIn("central ilegivel", processo.stderr)
+
+    def test_as_calibragens_do_repositorio_estao_versionadas_e_legiveis(self):
+        pasta = Path(sonar_local.ESTEIRA) / "calibragem"
+        arquivos = sorted(pasta.glob("*.json"))
+        self.assertIn("basalto.json", [a.name for a in arquivos])
+        self.assertIn("slipalison_coluna.json", [a.name for a in arquivos])
+        for arquivo in arquivos:
+            regras, versao = sonar_local._ler_calibragem(arquivo, arquivo.name)
+            self.assertTrue(regras, arquivo.name)
+            self.assertTrue(versao, arquivo.name)
 
 
 class Padroes(unittest.TestCase):
@@ -1067,7 +1172,7 @@ class ValidarLocal(Base):
         with McpFalso() as mcp:
             codigo, registrado, texto, _ = self.rodada(o, mcp.url)
         self.assertEqual((codigo, registrado), (0, True), texto)
-        self.assertIn("aviso, o CI decide: S1135 \u00d71", texto)
+        self.assertIn("aviso, o CI decide: S1135 \u00d71 (.sonar-local.json)", texto)
 
     def test_workflow_vermelho_nao_registra_mesmo_com_o_sonar_limpo(self):
         o = self.oficina()
@@ -1266,10 +1371,45 @@ ISCAS = [
     ),
     _s(
         "sonar_local.py",
-        "arquivo = repo / CALIBRACAO",
-        'arquivo = repo / "outro.json"',
+        "local = repo / CALIBRACAO",
+        'local = repo / "outro.json"',
         "Calibracao.test_regra_listada_nao_reprova_e_vira_aviso_so_a_listada",
         "o .sonar-local.json nao e lido",
+    ),
+    _s(
+        "sonar_local.py",
+        'central = pasta_central() / f"{chave}.json"',
+        'central = pasta_central() / "x.json"',
+        "CalibragemCentral.test_a_calibragem_central_isenta_e_diz_que_veio_dela",
+        "a calibragem central nao e lida",
+    ),
+    _s(
+        "sonar_local.py",
+        "    if local.is_file():\n",
+        "    if local.is_file() and not fontes:\n",
+        "CalibragemCentral.test_a_do_repositorio_soma_e_nao_substitui_a_central",
+        "a do repositorio so vale sem a central",
+    ),
+    _s(
+        "sonar_local.py",
+        'return {regra: " + ".join(o) for regra, o in origens.items()}, versoes',
+        "return {regra: o[0] for regra, o in origens.items()}, versoes",
+        "CalibragemCentral.test_a_mesma_regra_nas_duas_diz_as_duas_origens",
+        "a origem so diz a primeira fonte",
+    ),
+    _s(
+        "sonar_local.py",
+        "        if versao and versao != cliente.versao:",
+        "        if False:",
+        "CalibragemCentral.test_versao_diferente_da_imagem_avisa_e_nao_reprova",
+        "versao diferente da imagem nao avisa",
+    ),
+    _s(
+        "sonar_local.py",
+        "        if versao and versao != cliente.versao:",
+        "        if versao:",
+        "CalibragemCentral.test_a_mesma_versao_nao_avisa",
+        "a mesma versao tambem avisa",
     ),
     _s(
         "sonar_local.py",
@@ -1288,9 +1428,9 @@ ISCAS = [
     _s(
         "sonar_local.py",
         "        raise NaoMediu(\n"
-        '            f"{CALIBRACAO} ilegivel: precisa de `nao_espelhadas` (rode --calibrar)"\n'
+        '            f"{origem} ilegivel: precisa de `nao_espelhadas` (rode --calibrar)"\n'
         "        ) from None",
-        "        return set()",
+        '        return set(), ""',
         "Calibracao.test_arquivo_ilegivel_nao_vira_isencao",
         "arquivo ilegivel e lido como 'sem calibragem'",
     ),

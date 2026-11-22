@@ -972,19 +972,32 @@ python3 /caminho/para/github-workflows/bin/sonar_local.py --projeto slipalison_c
   `void promessa()` (S3735) e `x?: string | undefined` (S4782, que o
   `exactOptionalPropertyTypes` exige) que o servidor não acusa. Ligado assim, o
   portão reprovaria código certo e empurraria o agente a "consertar" soltando a
-  promessa. `sonar_local.py --calibrar [--somente src/] > .sonar-local.json` analisa com
+  promessa. `sonar_local.py --calibrar [--somente src/]` analisa com
   o MCP todo arquivo das `sonar.sources` na `main` (base vazia, e não diff) e
   compara com o que o **próprio servidor** tem aberto nela (`OPEN` e `CONFIRMED`,
   paginado, pelo `search_sonar_issues_in_projects`). Regra que o MCP acusa e o
   servidor não tem em lugar nenhum é `nao_espelhadas` (com a contagem e um
   `arquivo:linha`); a que bate com o servidor, no mesmo arquivo e linha, é
   `confiaveis`; a que o servidor tem, mas noutro lugar, é `divergentes` (só
-  informa). O JSON leva a versão do MCP e a data, e se versiona na raiz do
-  repositório medido como **`.sonar-local.json`**. O `sonar_local.py` o lê: regra
-  de `nao_espelhadas` não reprova (nem no hook, para o agente não reescrever
-  código certo) e sai numa linha `aviso, o CI decide: S3735 ×2`. Sem o arquivo,
-  tudo reprova como antes; um arquivo ilegível dá código 2, e nunca vira isenção.
-  Refaça a calibragem quando subir a imagem do MCP ou o perfil do projeto.
+  informa). O JSON sai no stdout, com a versão da imagem do MCP e a data.
+- **A calibragem é central, por chave de projeto:
+  [`calibragem/<chave>.json`](calibragem/)** neste repositório (hoje
+  `basalto.json` e `slipalison_coluna.json`). Ela depende do perfil do servidor e
+  da imagem do MCP, e não do repositório, e assim chega a todo clone sem esperar
+  a `main` dele. O `sonar_local.py` lê a da chave do projeto medido; um
+  **`.sonar-local.json`** na raiz do repositório medido ainda vale e **soma** à
+  central, sem substituí-la. A regra de `nao_espelhadas` não reprova (nem no
+  hook, para o agente não reescrever código certo) e sai numa linha `aviso, o CI
+  decide: S3735 ×2 (central)`, dizendo de onde veio cada exceção (`central`,
+  `.sonar-local.json` ou as duas). Sem calibragem, tudo reprova; arquivo
+  ilegível dá código 2, e nunca vira isenção. Se a versão da imagem do MCP
+  medida agora for outra que a gravada, o resumo avisa `calibracao de <versão>:
+  recalibre`, e só avisa: não reprova.
+- **Como recalibrar:** com o repositório na `main` e o MCP no ar, rode
+  `sonar_local.py --calibrar > calibragem/<chave>.json` (no basalto, ~2,5 min; no
+  coluna, ~18 min, pelo SonarCloud; `--projeto <chave>` quando o workflow dispensa
+  o Sonar) e abra o PR aqui. **Quando:** ao trocar a imagem do MCP (o aviso acima)
+  ou o perfil de qualidade do projeto no servidor.
 - **O que chega de fora fica dentro do repositório.** O `--hook` só lê o
   `file_path` que fica DENTRO do repositório do diretório do hook (`--repo`, o
   atual), por `os.path.realpath` + `os.path.commonpath`: caminho fora dele, ou
