@@ -105,6 +105,7 @@ class McpFalso:
         self.modo = modo
         self.destino = destino_do_redirect
         self.chamadas: list[dict] = []
+        self.subindo = 2  # no modo "subindo": quantas chamadas respondem "ainda subindo"
         self.buscas: list[dict] = []  # os argumentos de search_sonar_issues_in_projects
         self.do_servidor: list[dict] = []  # o que o servidor "tem aberto"
         self.projetos_cloud: list[str] = []  # o que search_my_sonarqube_projects acha
@@ -165,6 +166,14 @@ class McpFalso:
             return self.enviar(tratador, 302, "", Location=self.destino)
         if self.modo == "lento":
             time.sleep(5)
+        if self.modo == "subindo" and pedido.get("method") == "tools/call":
+            self.subindo -= 1
+            if self.subindo >= 0:
+                texto = "Server initialization is taking longer than expected. Try again."
+                resultado = {"content": [{"type": "text", "text": texto}], "isError": True}
+                return self.json(
+                    tratador, {"jsonrpc": "2.0", "id": pedido["id"], "result": resultado}
+                )
         metodo = pedido.get("method")
         if metodo == "notifications/initialized":
             return self.enviar(tratador, 202)
@@ -755,6 +764,28 @@ class Padroes(unittest.TestCase):
 
 
 class Falhas(Base):
+    def test_servidor_ainda_subindo_e_tentado_de_novo(self):
+        o = self.com_problema()
+        with (
+            McpFalso("subindo") as mcp,
+            mock.patch.object(sonar_local, "ESPERA_ENTRE_TENTATIVAS_S", 0.01),
+            mock.patch.dict(os.environ, o.ambiente(mcp.url)),
+        ):
+            resultado = sonar_local.rodar(o.raiz)
+        self.assertEqual(resultado.codigo(), 1)
+        self.assertEqual(resultado.nao_medidos, [])
+
+    def test_servidor_que_nunca_termina_de_subir_nao_mede(self):
+        o = self.com_problema()
+        with (
+            McpFalso("subindo") as mcp,
+            mock.patch.object(sonar_local, "ESPERA_ENTRE_TENTATIVAS_S", 0.01),
+            mock.patch.dict(os.environ, o.ambiente(mcp.url)),
+        ):
+            mcp.subindo = 99
+            resultado = sonar_local.rodar(o.raiz)
+        self.assertEqual(resultado.codigo(), 2)
+
     def saida(self, processo: subprocess.CompletedProcess) -> str:
         return processo.stdout + processo.stderr
 
@@ -1375,6 +1406,20 @@ ISCAS = [
         'local = repo / "outro.json"',
         "Calibracao.test_regra_listada_nao_reprova_e_vira_aviso_so_a_listada",
         "o .sonar-local.json nao e lido",
+    ),
+    _s(
+        "sonar_local.py",
+        'if "taking longer than expected" not in str(erro) or tentativa == TENTATIVAS - 1:',
+        "if True:",
+        "Falhas.test_servidor_ainda_subindo_e_tentado_de_novo",
+        "o MCP que ainda sobe nao e tentado de novo",
+    ),
+    _s(
+        "sonar_local.py",
+        "        for tentativa in range(TENTATIVAS):",
+        "        for tentativa in range(1):",
+        "Falhas.test_servidor_ainda_subindo_e_tentado_de_novo",
+        "so uma tentativa quando o MCP ainda sobe",
     ),
     _s(
         "sonar_local.py",

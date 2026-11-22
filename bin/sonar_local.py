@@ -114,6 +114,8 @@ REF_MAIN = "origin/main"
 PRAZO_HOOK_S = 25.0
 PRAZO_CHAMADA_S = 120.0
 PARALELO = 3
+TENTATIVAS = 4
+ESPERA_ENTRE_TENTATIVAS_S = 5.0
 CALIBRACAO = ".sonar-local.json"
 ORIGEM_CENTRAL = "central"
 ESTEIRA = Path(__file__).resolve().parent.parent
@@ -595,6 +597,18 @@ class ClienteMcp:
         self.iniciado = True
 
     def chamar(self, ferramenta: str, argumentos: dict) -> dict:
+        """A ferramenta, com `TENTATIVAS` se o servidor ainda esta subindo (o MCP
+        responde "initialization is taking longer than expected" no comeco)."""
+        for tentativa in range(TENTATIVAS):
+            try:
+                return self._chamar_uma_vez(ferramenta, argumentos)
+            except NaoMediu as erro:
+                if "taking longer than expected" not in str(erro) or tentativa == TENTATIVAS - 1:
+                    raise
+                time.sleep(ESPERA_ENTRE_TENTATIVAS_S)
+        raise NaoMediu("sem resposta do MCP")
+
+    def _chamar_uma_vez(self, ferramenta: str, argumentos: dict) -> dict:
         self.proximo_id += 1
         corpo = self._enviar(
             {
