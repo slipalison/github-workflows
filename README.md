@@ -956,6 +956,25 @@ python3 /caminho/para/github-workflows/bin/sonar_local.py --projeto slipalison_c
   duplicação. A análise é por arquivo: regra que precisa do projeto inteiro
   também fica para o CI. Custa ~2 s por arquivo no SonarQube do homelab e mais no
   SonarCloud; só os arquivos com problema são analisados duas vezes.
+- **Calibragem (`--calibrar`): o que o MCP acusa e o servidor não.** O
+  `analyze_code_snippet` analisa o arquivo **sozinho**, sem `tsconfig` nem tipos,
+  e as exceções do SonarJS que dependem de tipo deixam de valer: ele acusa
+  `void promessa()` (S3735) e `x?: string | undefined` (S4782, que o
+  `exactOptionalPropertyTypes` exige) que o servidor não acusa. Ligado assim, o
+  portão reprovaria código certo e empurraria o agente a "consertar" soltando a
+  promessa. `sonar_local.py --calibrar [--saida ARQ] [--somente src/]` analisa com
+  o MCP todo arquivo das `sonar.sources` na `main` (base vazia, e não diff) e
+  compara com o que o **próprio servidor** tem aberto nela (`OPEN` e `CONFIRMED`,
+  paginado, pelo `search_sonar_issues_in_projects`). Regra que o MCP acusa e o
+  servidor não tem em lugar nenhum é `nao_espelhadas` (com a contagem e um
+  `arquivo:linha`); a que bate com o servidor, no mesmo arquivo e linha, é
+  `confiaveis`; a que o servidor tem, mas noutro lugar, é `divergentes` (só
+  informa). O JSON leva a versão do MCP e a data, e se versiona na raiz do
+  repositório medido como **`.sonar-local.json`**. O `sonar_local.py` o lê: regra
+  de `nao_espelhadas` não reprova (nem no hook, para o agente não reescrever
+  código certo) e sai numa linha `aviso, o CI decide: S3735 ×2`. Sem o arquivo,
+  tudo reprova como antes; um arquivo ilegível dá código 2, e nunca vira isenção.
+  Refaça a calibragem quando subir a imagem do MCP ou o perfil do projeto.
 - **Segredo.** O token vem do helper de headers da máquina, fica só em memória e
   só vai a `127.0.0.1` (outro destino é recusado, e o redirecionamento não é
   seguido). Nada dele sai em stdout, stderr, argumento ou arquivo, nem num erro
