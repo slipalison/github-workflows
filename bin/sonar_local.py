@@ -89,7 +89,7 @@ USO
     sonar_local.py                 o PR inteiro (merge-base com origin/main)
     sonar_local.py --repo DIR      outro repositorio
     sonar_local.py --hook          um arquivo, pela stdin do hook
-    sonar_local.py --calibrar [--saida ARQ] [--somente src/]   gera o .sonar-local.json
+    sonar_local.py --calibrar [--somente src/] > .sonar-local.json   gera o JSON
 """
 
 from __future__ import annotations
@@ -103,7 +103,6 @@ import re
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -1137,7 +1136,6 @@ def argumentos(argv: list[str] | None) -> argparse.Namespace:
         action="store_true",
         help="gera o .sonar-local.json: o que o MCP acusa na main e o servidor nao",
     )
-    ap.add_argument("--saida", type=Path, help="com --calibrar: grava o JSON aqui (padrao: stdout)")
     ap.add_argument(
         "--somente",
         action="append",
@@ -1148,48 +1146,15 @@ def argumentos(argv: list[str] | None) -> argparse.Namespace:
     return ap.parse_args(argv)
 
 
-MENSAGEM_SAIDA = "--saida e um arquivo .json dentro do repositorio ou do diretorio temporario"
-NOME_DE_SAIDA = re.compile(r"[\w.-]+\.json")
 REF_SEGURA = re.compile(r"\w[\w./~^@{}-]*")
 CHAVE_SEGURA = re.compile(r"[\w.:-]+")
 
 
-def raizes_de_saida(repo: Path) -> list[str]:
-    return [str(repo), tempfile.gettempdir()]
-
-
-def dentro_de(pasta: str, caminho: str) -> str:
-    """O caminho real de `caminho` (relativo a `pasta`, ou absoluto), se ele fica
-    DENTRO de `pasta`; ValueError se sai dela. Como o `dentro_de` do
-    validar_local.py: `realpath` + `commonpath` + recusa, a validacao que o Sonar
-    reconhece (S2083, S8707)."""
-    base = os.path.realpath(pasta)
-    alvo = os.path.realpath(os.path.join(base, caminho))
-    if os.path.commonpath([base, alvo]) != base:
-        raise ValueError(f"{caminho!r} sairia de {base}")
-    return alvo
-
-
-def gravar_dentro(caminho: Path, raizes: list[str], texto: str) -> None:
-    """Grava `texto` em `caminho` so se ele e um .json dentro de uma das raizes."""
-    if not NOME_DE_SAIDA.fullmatch(caminho.name):
-        raise NaoMediu(MENSAGEM_SAIDA)
-    for raiz in raizes:
-        try:
-            alvo = dentro_de(raiz, str(caminho))
-        except ValueError:
-            continue
-        with open(alvo, "w") as arquivo:
-            arquivo.write(texto)
-        return
-    raise NaoMediu(MENSAGEM_SAIDA)
-
-
-def argumentos_seguros(args: argparse.Namespace, repo: Path) -> None:
+def argumentos_seguros(args: argparse.Namespace) -> None:
     """O que vem da linha de comando so entra se for do tamanho que se espera: a
     ref e a chave sao palavras (nada que o git leia como opcao), `--somente` e
-    relativo e fica dentro do repositorio, e `--saida` fica no repositorio ou no
-    diretorio temporario (`gravar_dentro` confere de novo, onde grava)."""
+    relativo e fica dentro do repositorio. Nenhum caminho da linha de comando e
+    aberto para escrita: o JSON da calibragem sai no stdout (`> arquivo`)."""
     if args.base and not REF_SEGURA.fullmatch(args.base):
         raise NaoMediu(f"--base espera uma ref do git, e nao {args.base!r}")
     if args.projeto and not CHAVE_SEGURA.fullmatch(args.projeto):
@@ -1198,11 +1163,6 @@ def argumentos_seguros(args: argparse.Namespace, repo: Path) -> None:
         normal = os.path.normpath(prefixo)
         if os.path.isabs(normal) or normal == ".." or normal.startswith(".." + os.sep):
             raise NaoMediu(f"--somente espera um caminho dentro do repositorio: {prefixo!r}")
-    if args.saida and (
-        not NOME_DE_SAIDA.fullmatch(args.saida.name)
-        or confinar(args.saida, raizes_de_saida(repo)) is None
-    ):
-        raise NaoMediu(MENSAGEM_SAIDA)
 
 
 def projeto_pedido(repo: Path, args: argparse.Namespace) -> Projeto | None:
@@ -1227,10 +1187,7 @@ def rodar_calibragem(repo: Path, args: argparse.Namespace) -> None:
         lambda texto: diz(texto, sys.stderr),
     )
     texto = json.dumps(calibragem, indent=2, ensure_ascii=False) + "\n"
-    if args.saida:
-        gravar_dentro(args.saida, raizes_de_saida(repo), texto)
-    else:
-        diz(texto.rstrip("\n"))
+    diz(texto.rstrip("\n"))
     diz(
         f"sonar-local: calibrado em {calibragem['arquivos_analisados']} arquivos: "
         f"{len(calibragem['nao_espelhadas'])} regra(s) nao espelhada(s), "
@@ -1245,7 +1202,7 @@ def main(argv: list[str] | None = None, entrada=None) -> int:
         return hook(entrada or sys.stdin, args.repo)
     try:
         repo = raiz_do_repo(args.repo)
-        argumentos_seguros(args, repo)
+        argumentos_seguros(args)
         if args.calibrar:
             rodar_calibragem(repo, args)
             return 0

@@ -972,7 +972,7 @@ python3 /caminho/para/github-workflows/bin/sonar_local.py --projeto slipalison_c
   `void promessa()` (S3735) e `x?: string | undefined` (S4782, que o
   `exactOptionalPropertyTypes` exige) que o servidor não acusa. Ligado assim, o
   portão reprovaria código certo e empurraria o agente a "consertar" soltando a
-  promessa. `sonar_local.py --calibrar [--saida ARQ] [--somente src/]` analisa com
+  promessa. `sonar_local.py --calibrar [--somente src/] > .sonar-local.json` analisa com
   o MCP todo arquivo das `sonar.sources` na `main` (base vazia, e não diff) e
   compara com o que o **próprio servidor** tem aberto nela (`OPEN` e `CONFIRMED`,
   paginado, pelo `search_sonar_issues_in_projects`). Regra que o MCP acusa e o
@@ -988,9 +988,10 @@ python3 /caminho/para/github-workflows/bin/sonar_local.py --projeto slipalison_c
 - **O que chega de fora fica dentro do repositório.** O `--hook` só lê o
   `file_path` que fica DENTRO do repositório do diretório do hook (`--repo`, o
   atual), por `os.path.realpath` + `os.path.commonpath`: caminho fora dele, ou
-  link que aponta para fora, sai 0 em silêncio. `--saida` é um `.json` no repositório ou
-  no diretório temporário, `--somente` é relativo e sem `..`, e `--base` e
-  `--projeto` só aceitam o formato de uma ref e de uma chave.
+  link que aponta para fora, sai 0 em silêncio. `--somente` é relativo e sem `..`,
+  `--base` e `--projeto` só aceitam o formato de uma ref e de uma chave, e nenhum
+  caminho da linha de comando é aberto para escrita (o JSON da calibragem sai no
+  stdout).
 - **Segredo.** O token vem do helper de headers da máquina, fica só em memória e
   só vai a `127.0.0.1` (outro destino é recusado, e o redirecionamento não é
   seguido). Nada dele sai em stdout, stderr, argumento ou arquivo, nem num erro

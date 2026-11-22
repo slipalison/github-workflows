@@ -546,12 +546,11 @@ class Calibracao(Base):
         with McpFalso() as mcp:
             mcp.do_servidor = [do_servidor("src/a.ts", 2, "S1135")]
             processo = o.rodar(mcp.url, "--calibrar")
-            arquivo = Path(o.tmp.name) / "calibragem.json"
-            gravado = o.rodar(mcp.url, "--calibrar", "--saida", str(arquivo))
+            sem_saida = o.rodar(mcp.url, "--calibrar", "--saida", str(o.raiz / "x.json"))
         self.assertEqual(processo.returncode, 0, processo.stderr)
         self.assertEqual(json.loads(processo.stdout)["nao_espelhadas"]["S3776"]["ocorrencias"], 1)
-        self.assertEqual(json.loads(arquivo.read_text()), json.loads(processo.stdout))
-        self.assertEqual(gravado.stdout, "")
+        self.assertEqual(sem_saida.returncode, 2, "nenhum caminho da linha de comando e gravado")
+        self.assertFalse((o.raiz / "x.json").exists())
         self.assertNotIn(CANARIO, processo.stdout + processo.stderr)
 
     def calibragem_de(self, *regras: str) -> str:
@@ -871,43 +870,6 @@ class Confinamento(Base):
         with McpFalso() as mcp:
             processo = self.hook(o, mcp.url, o.raiz / "src" / "a.ts")
         self.assertEqual(processo.returncode, 2, processo.stderr)
-
-    def test_saida_so_no_repositorio_ou_no_diretorio_temporario(self):
-        o = self.oficina()
-        for destino in ("/usr/share/sonar-local-teste.json", "../../../../usr/share/x.json"):
-            with self.subTest(destino), McpFalso() as mcp:
-                processo = o.rodar(mcp.url, "--calibrar", "--saida", destino)
-                self.assertEqual(processo.returncode, 2, processo.stdout)
-                self.assertIn("--saida e um arquivo .json dentro", processo.stderr)
-                self.assertEqual(mcp.chamadas, [])
-        self.assertFalse(Path("/usr/share/sonar-local-teste.json").exists())
-
-    def test_saida_por_link_que_sai_do_diretorio_temporario_tambem_e_recusada(self):
-        o = self.oficina()
-        link = Path(o.tmp.name) / "link"
-        link.symlink_to("/usr/share")
-        with McpFalso() as mcp:
-            processo = o.rodar(mcp.url, "--calibrar", "--saida", str(link / "x.json"))
-        self.assertEqual(processo.returncode, 2, processo.stdout)
-        self.assertIn("--saida e um arquivo .json dentro", processo.stderr)
-
-    def test_saida_so_aceita_nome_de_arquivo_json(self):
-        o = self.oficina()
-        with McpFalso() as mcp:
-            for nome in ("cal.txt", ".json", "a b.json", "cal.json.sh"):
-                with self.subTest(nome):
-                    processo = o.rodar(mcp.url, "--calibrar", "--saida", str(o.raiz / nome))
-                    self.assertEqual(processo.returncode, 2, processo.stdout)
-                    self.assertIn("--saida e um arquivo .json", processo.stderr)
-            self.assertEqual(mcp.chamadas, [])
-        self.assertFalse((o.raiz / "cal.txt").exists())
-
-    def test_saida_dentro_do_repositorio_e_aceita(self):
-        o = self.oficina()
-        with McpFalso() as mcp:
-            processo = o.rodar(mcp.url, "--calibrar", "--saida", str(o.raiz / "cal.json"))
-        self.assertEqual(processo.returncode, 0, processo.stderr)
-        self.assertIn("nao_espelhadas", (o.raiz / "cal.json").read_text())
 
     def test_somente_base_e_projeto_so_entram_no_formato_esperado(self):
         o = self.oficina()
@@ -1413,34 +1375,6 @@ ISCAS = [
     ),
     _s(
         "sonar_local.py",
-        "        or confinar(args.saida, raizes_de_saida(repo)) is None\n",
-        "        or False\n",
-        "Confinamento.test_saida_so_no_repositorio_ou_no_diretorio_temporario",
-        "--saida grava onde a pessoa mandar (e `gravar_dentro` tambem deixa)",
-        extra=(
-            (
-                "sonar_local.py",
-                "    if os.path.commonpath([base, alvo]) != base:",
-                "    if False:",
-            ),
-        ),
-    ),
-    _s(
-        "sonar_local.py",
-        "    real = os.path.realpath(caminho)\n",
-        "    real = os.path.abspath(caminho)\n",
-        "Confinamento.test_saida_por_link_que_sai_do_diretorio_temporario_tambem_e_recusada",
-        "o link para fora do temporario passa (e `gravar_dentro` tambem deixa)",
-        extra=(
-            (
-                "sonar_local.py",
-                "    alvo = os.path.realpath(os.path.join(base, caminho))\n",
-                "    alvo = os.path.abspath(os.path.join(base, caminho))\n",
-            ),
-        ),
-    ),
-    _s(
-        "sonar_local.py",
         'if os.path.isabs(normal) or normal == ".." or normal.startswith(".." + os.sep):',
         "if False:",
         "Confinamento.test_somente_base_e_projeto_so_entram_no_formato_esperado",
@@ -1490,18 +1424,10 @@ ISCAS = [
     ),
     _s(
         "sonar_local.py",
-        "        not NOME_DE_SAIDA.fullmatch(args.saida.name)\n        or ",
-        "        ",
-        "Confinamento.test_saida_so_aceita_nome_de_arquivo_json",
-        "--saida aceita qualquer nome de arquivo (e `gravar_dentro` tambem)",
-        extra=(
-            (
-                "sonar_local.py",
-                "    if not NOME_DE_SAIDA.fullmatch(caminho.name):\n"
-                "        raise NaoMediu(MENSAGEM_SAIDA)\n",
-                "",
-            ),
-        ),
+        '    ap.add_argument(\n        "--somente",',
+        '    ap.add_argument("--saida", type=Path)\n    ap.add_argument(\n        "--somente",',
+        "Calibracao.test_pela_linha_de_comando_o_json_sai_no_stdout_e_o_canario_nao",
+        "a linha de comando aceita um caminho de saida",
     ),
     _s(
         "sonar_local.py",
