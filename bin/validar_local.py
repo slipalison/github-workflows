@@ -1689,7 +1689,7 @@ def cabecalho(repo: Path, escolhidos: list[Path], args: argparse.Namespace, n: i
     )
     diz(
         "  trocadas:  harden-runner, codeql-action, docker/login-action; Sonar do CI desligado"
-        " (o Sonar local roda no fim); nada e publicado (push: false)"
+        " (o Sonar local roda antes); nada e publicado (push: false)"
     )
 
 

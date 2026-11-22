@@ -1019,7 +1019,8 @@ class ValidarLocal(Base):
         ):
             codigo = validar_local.validar(args, o.raiz, arvore, "")
         registrado = (validar_local.registro(o.raiz) / arvore).is_file()
-        texto = saida.getvalue()
+        # Sob o act a saida e um terminal, e o validar_local colore o que diz.
+        texto = re.sub(r"\x1b\[[0-9;]*m", "", saida.getvalue())
         self.assertNotIn(CANARIO, texto)
         return codigo, registrado, texto, arvore
 
