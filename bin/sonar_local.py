@@ -1148,7 +1148,8 @@ def argumentos(argv: list[str] | None) -> argparse.Namespace:
     return ap.parse_args(argv)
 
 
-MENSAGEM_SAIDA = "--saida fica dentro do repositorio ou do diretorio temporario"
+MENSAGEM_SAIDA = "--saida e um arquivo .json dentro do repositorio ou do diretorio temporario"
+NOME_DE_SAIDA = re.compile(r"[\w.-]+\.json")
 REF_SEGURA = re.compile(r"\w[\w./~^@{}-]*")
 CHAVE_SEGURA = re.compile(r"[\w.:-]+")
 
@@ -1157,17 +1158,30 @@ def raizes_de_saida(repo: Path) -> list[str]:
     return [str(repo), tempfile.gettempdir()]
 
 
+def dentro_de(pasta: str, caminho: str) -> str:
+    """O caminho real de `caminho` (relativo a `pasta`, ou absoluto), se ele fica
+    DENTRO de `pasta`; ValueError se sai dela. Como o `dentro_de` do
+    validar_local.py: `realpath` + `commonpath` + recusa, a validacao que o Sonar
+    reconhece (S2083, S8707)."""
+    base = os.path.realpath(pasta)
+    alvo = os.path.realpath(os.path.join(base, caminho))
+    if os.path.commonpath([base, alvo]) != base:
+        raise ValueError(f"{caminho!r} sairia de {base}")
+    return alvo
+
+
 def gravar_dentro(caminho: Path, raizes: list[str], texto: str) -> None:
-    """Grava `texto` em `caminho` so se o caminho real fica DENTRO de uma das
-    raizes: o `realpath` + `commonpath` na mesma funcao do `open`, a forma que o
-    Sonar reconhece como validacao (S8707)."""
-    alvo = os.path.realpath(caminho)
+    """Grava `texto` em `caminho` so se ele e um .json dentro de uma das raizes."""
+    if not NOME_DE_SAIDA.fullmatch(caminho.name):
+        raise NaoMediu(MENSAGEM_SAIDA)
     for raiz in raizes:
-        pasta = os.path.realpath(raiz)
-        if os.path.commonpath([pasta, alvo]) == pasta:
-            with open(alvo, "w") as arquivo:
-                arquivo.write(texto)
-            return
+        try:
+            alvo = dentro_de(raiz, str(caminho))
+        except ValueError:
+            continue
+        with open(alvo, "w") as arquivo:
+            arquivo.write(texto)
+        return
     raise NaoMediu(MENSAGEM_SAIDA)
 
 
@@ -1184,7 +1198,10 @@ def argumentos_seguros(args: argparse.Namespace, repo: Path) -> None:
         normal = os.path.normpath(prefixo)
         if os.path.isabs(normal) or normal == ".." or normal.startswith(".." + os.sep):
             raise NaoMediu(f"--somente espera um caminho dentro do repositorio: {prefixo!r}")
-    if args.saida and confinar(args.saida, raizes_de_saida(repo)) is None:
+    if args.saida and (
+        not NOME_DE_SAIDA.fullmatch(args.saida.name)
+        or confinar(args.saida, raizes_de_saida(repo)) is None
+    ):
         raise NaoMediu(MENSAGEM_SAIDA)
 
 

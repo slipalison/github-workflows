@@ -878,7 +878,7 @@ class Confinamento(Base):
             with self.subTest(destino), McpFalso() as mcp:
                 processo = o.rodar(mcp.url, "--calibrar", "--saida", destino)
                 self.assertEqual(processo.returncode, 2, processo.stdout)
-                self.assertIn("--saida fica dentro do repositorio", processo.stderr)
+                self.assertIn("--saida e um arquivo .json dentro", processo.stderr)
                 self.assertEqual(mcp.chamadas, [])
         self.assertFalse(Path("/usr/share/sonar-local-teste.json").exists())
 
@@ -889,7 +889,18 @@ class Confinamento(Base):
         with McpFalso() as mcp:
             processo = o.rodar(mcp.url, "--calibrar", "--saida", str(link / "x.json"))
         self.assertEqual(processo.returncode, 2, processo.stdout)
-        self.assertIn("--saida fica dentro do repositorio", processo.stderr)
+        self.assertIn("--saida e um arquivo .json dentro", processo.stderr)
+
+    def test_saida_so_aceita_nome_de_arquivo_json(self):
+        o = self.oficina()
+        with McpFalso() as mcp:
+            for nome in ("cal.txt", ".json", "a b.json", "cal.json.sh"):
+                with self.subTest(nome):
+                    processo = o.rodar(mcp.url, "--calibrar", "--saida", str(o.raiz / nome))
+                    self.assertEqual(processo.returncode, 2, processo.stdout)
+                    self.assertIn("--saida e um arquivo .json", processo.stderr)
+            self.assertEqual(mcp.chamadas, [])
+        self.assertFalse((o.raiz / "cal.txt").exists())
 
     def test_saida_dentro_do_repositorio_e_aceita(self):
         o = self.oficina()
@@ -1402,15 +1413,15 @@ ISCAS = [
     ),
     _s(
         "sonar_local.py",
-        "    if args.saida and confinar(args.saida, raizes_de_saida(repo)) is None:\n",
-        "    if False:\n",
+        "        or confinar(args.saida, raizes_de_saida(repo)) is None\n",
+        "        or False\n",
         "Confinamento.test_saida_so_no_repositorio_ou_no_diretorio_temporario",
         "--saida grava onde a pessoa mandar (e `gravar_dentro` tambem deixa)",
         extra=(
             (
                 "sonar_local.py",
-                "        if os.path.commonpath([pasta, alvo]) == pasta:",
-                "        if True:",
+                "    if os.path.commonpath([base, alvo]) != base:",
+                "    if False:",
             ),
         ),
     ),
@@ -1423,8 +1434,8 @@ ISCAS = [
         extra=(
             (
                 "sonar_local.py",
-                "    alvo = os.path.realpath(caminho)\n",
-                "    alvo = os.path.abspath(caminho)\n",
+                "    alvo = os.path.realpath(os.path.join(base, caminho))\n",
+                "    alvo = os.path.abspath(os.path.join(base, caminho))\n",
             ),
         ),
     ),
@@ -1476,6 +1487,21 @@ ISCAS = [
         "        pass",
         "NotaDoPython.test_arquivo_python_diz_que_a_analise_de_fluxo_so_o_ci_mede",
         "Python nao diz que o fluxo de seguranca so o CI mede",
+    ),
+    _s(
+        "sonar_local.py",
+        "        not NOME_DE_SAIDA.fullmatch(args.saida.name)\n        or ",
+        "        ",
+        "Confinamento.test_saida_so_aceita_nome_de_arquivo_json",
+        "--saida aceita qualquer nome de arquivo (e `gravar_dentro` tambem)",
+        extra=(
+            (
+                "sonar_local.py",
+                "    if not NOME_DE_SAIDA.fullmatch(caminho.name):\n"
+                "        raise NaoMediu(MENSAGEM_SAIDA)\n",
+                "",
+            ),
+        ),
     ),
     _s(
         "sonar_local.py",

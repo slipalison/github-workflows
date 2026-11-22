@@ -988,7 +988,7 @@ python3 /caminho/para/github-workflows/bin/sonar_local.py --projeto slipalison_c
 - **O que chega de fora fica dentro do repositório.** O `--hook` só lê o
   `file_path` que fica DENTRO do repositório do diretório do hook (`--repo`, o
   atual), por `os.path.realpath` + `os.path.commonpath`: caminho fora dele, ou
-  link que aponta para fora, sai 0 em silêncio. `--saida` fica no repositório ou
+  link que aponta para fora, sai 0 em silêncio. `--saida` é um `.json` no repositório ou
   no diretório temporário, `--somente` é relativo e sem `..`, e `--base` e
   `--projeto` só aceitam o formato de uma ref e de uma chave.
 - **Segredo.** O token vem do helper de headers da máquina, fica só em memória e
