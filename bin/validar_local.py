@@ -22,10 +22,11 @@ uma action vazia, dita no resumo:
     github/codeql-action          envia SARIF para a aba Security do GitHub;
     docker/login-action           login no GHCR com o GITHUB_TOKEN, que aqui
                                   nao existe (e o PR nao publica imagem);
-    o Sonar                       `sonar_projeto` vazio, e `sonar_dispensa`
+    o Sonar do CI                 `sonar_projeto` vazio, e `sonar_dispensa`
                                   com o motivo (sem ele o portao da esteira
                                   reprova "Sonar desligado sem motivo"): a
-                                  analise e do SonarQube, e so o CI a mede;
+                                  analise do servidor e so do CI. O que da
+                                  para medir aqui, mede o SONAR LOCAL (abaixo);
     a publicacao da imagem        o job `imagem` publica `sha-<commit>` no
                                   GHCR ate no PR; na copia da esteira, todo
                                   `push: true` vira `push: false`.
@@ -116,6 +117,19 @@ e dois casos conhecidos — GH_PACKAGES_TOKEN e o token do `gh`, e
 GITOPS_SSH_KEY recebe o valor de mentira acima. O que faltar e dito antes de
 rodar, com o nome do workflow que o pede.
 
+SONAR LOCAL
+-----------
+O portao do SonarQube exige zero problemas novos, e PR verde aqui caia nele (e
+cada conserto custava outro run inteiro). Por isso, com todos os workflows
+verdes e ANTES de registrar a arvore, roda `bin/sonar_local.py`: os arquivos que
+o PR muda, analisados pelo MCP da Sonar desta caixa com o perfil de qualidade do
+projeto, e so o que a base (merge-base com origin/main) nao tinha conta. Problema
+novo reprova a rodada. Nao conseguir medir (MCP fora, sem token, projeto
+ilegivel) tambem reprova, com a instrucao de subir o MCP; so passa com
+`--sem-sonar-local "<motivo>"`, e o motivo vai para o resumo e para o registro.
+A opcao perdoa so o "nao mediu": problema novo continua reprovando. Fica para o
+CI o que o MCP nao analisa (Rust), a cobertura do codigo novo e a duplicacao.
+
 O REGISTRO
 ----------
 Com tudo verde e a arvore sem mudanca por commitar, grava
@@ -128,6 +142,7 @@ USO (na raiz do repositorio que vai abrir o PR)
     validar-local --listar           o que rodaria, sem rodar
     validar-local --status           o HEAD ja foi validado?
     validar-local --esteira-local    com a esteira desta maquina, como esta
+    validar-local --sem-sonar-local "MCP da Sonar fora do ar"   quando nao da para medir
     VALIDAR_LOCAL_JOBS=1 validar-local   um job por vez, como antes de 2026-10
 """
 
@@ -1468,6 +1483,11 @@ def argumentos() -> argparse.Namespace:
     ap.add_argument("--esteira-local", action="store_true", help="usa a esteira desta maquina")
     ap.add_argument("--listar", action="store_true", help="mostra o que rodaria e sai")
     ap.add_argument("--status", action="store_true", help="o HEAD ja passou?")
+    ap.add_argument(
+        "--sem-sonar-local",
+        metavar="MOTIVO",
+        help="passa mesmo sem conseguir medir o Sonar local (problema novo continua reprovando)",
+    )
     # O passo que o `cercar` poe em cada job chama este script assim; nao e
     # para uso direto.
     ap.add_argument("--vez", choices=("leve", "pesado"), help=argparse.SUPPRESS)
@@ -1483,6 +1503,8 @@ def argumento_invalido(args: argparse.Namespace) -> str | None:
             return f"-W espera o nome de um arquivo de .github/workflows, e nao {nome!r}"
     if args.job is not None and not ID_JOB.fullmatch(args.job):
         return f"-j espera o id de um job, e nao {args.job!r}"
+    if args.sem_sonar_local is not None and not args.sem_sonar_local.strip():
+        return "--sem-sonar-local espera o motivo, e o motivo nao pode ser vazio"
     return None
 
 
@@ -1575,8 +1597,57 @@ def resumir(resultado: dict[str, dict[str, str]], minutos: float) -> bool:
             + (f" — {VERMELHO}{', '.join(ruins)}{FIM}" if ruins else "")
         )
         ok = ok and not ruins and bool(jobs)
-    diz(f"  {minutos:.1f} min nesta maquina; o Sonar so o CI mede.")
+    diz(f"  {minutos:.1f} min nesta maquina.")
     return ok
+
+
+SO_O_CI = "Rust, cobertura do codigo novo e duplicacao"
+
+
+def _sonar_local():
+    pasta = str(Path(__file__).resolve().parent)
+    if pasta not in sys.path:
+        sys.path.insert(0, pasta)
+    import sonar_local
+
+    return sonar_local
+
+
+def medir_sonar(repo: Path, args: argparse.Namespace) -> tuple[bool, str]:
+    """O Sonar local (bin/sonar_local.py): (passou, o que entra no registro).
+
+    Problema novo reprova. Nao conseguir medir tambem, a menos que
+    `--sem-sonar-local` diga por que — e so isso: ele nao perdoa problema novo.
+    """
+    sonar = _sonar_local()
+    diz("")
+    try:
+        resultado = sonar.rodar(repo)
+        nao_mediu = resultado.motivo_do_2() if resultado.codigo() == 2 else None
+    except sonar.NaoMediu as erro:
+        resultado, nao_mediu = None, str(erro)
+    except Exception as erro:  # noqa: BLE001 - nada de traceback perto do token
+        resultado, nao_mediu = None, f"erro inesperado ({type(erro).__name__})"
+    if resultado is not None:
+        for linha in resultado.linhas():
+            diz(f"  {linha}")
+        diz(f"  Sonar local: {resultado.resumo()}")
+    if resultado is not None and resultado.novos:
+        diz(f"  {VERMELHO}problema novo{FIM}: o Sonar do CI reprovaria. So o CI mede: {SO_O_CI}.")
+        return False, ""
+    if nao_mediu is None:
+        diz(f"  So o CI mede: {SO_O_CI}.")
+        feito = "Sonar local sem projeto" if resultado.sem_projeto else "Sonar local 0 novos"
+        return True, feito
+    motivo = args.sem_sonar_local
+    if motivo:
+        diz(f"  Sonar local: {AMARELO}nao mediu{FIM}: {sonar.limpar(nao_mediu)}")
+        diz(f"  {AMARELO}Sonar local DISPENSADO{FIM} (--sem-sonar-local): {motivo.strip()}")
+        diz(f"  So o CI mede: {SO_O_CI} — e, desta vez, o Sonar inteiro.")
+        return True, f"Sonar local dispensado ({motivo.strip()})"
+    diz(f"  Sonar local: {VERMELHO}nao consegui medir{FIM}: {sonar.limpar(nao_mediu)}")
+    diz('  Sem medir, a rodada nao registra. Conserte, ou rode com --sem-sonar-local "<motivo>".')
+    return False, ""
 
 
 def concluir(
@@ -1609,8 +1680,8 @@ def cabecalho(repo: Path, escolhidos: list[Path], args: argparse.Namespace, n: i
         else "  jobs:      um por vez (VALIDAR_LOCAL_JOBS=1)"
     )
     diz(
-        "  trocadas:  harden-runner, codeql-action, docker/login-action; Sonar desligado;"
-        " nada e publicado (push: false)"
+        "  trocadas:  harden-runner, codeql-action, docker/login-action; Sonar do CI desligado"
+        " (o Sonar local roda no fim); nada e publicado (push: false)"
     )
 
 
@@ -1759,12 +1830,30 @@ def validar(args: argparse.Namespace, repo: Path, arvore: str, antes: str) -> in
     except ValueError as erro:
         return falha(str(erro))
     minutos = (time.monotonic() - inicio) / 60
+    return fechar(args, repo, arvore, antes, resultado, minutos, ok)
+
+
+def fechar(
+    args: argparse.Namespace,
+    repo: Path,
+    arvore: str,
+    antes: str,
+    resultado: dict[str, dict[str, str]],
+    minutos: float,
+    ok: bool,
+) -> int:
+    """Depois dos workflows: a arvore, o resumo, o Sonar local — e so entao o registro."""
     ok = arvore_intocada(repo, antes) and ok
     ok = resumir(resultado, minutos) and ok
+    feito_sonar = ""
+    if ok:
+        sonar_ok, feito_sonar = medir_sonar(repo, args)
+        ok = sonar_ok and ok
     if not ok:
         diz(f"\n{VERMELHO}REPROVADO{FIM}: conserte aqui antes de empurrar.")
         return 1
-    return concluir(repo, arvore, args, bool(antes), ", ".join(resultado), minutos)
+    feito = ", ".join([*resultado, feito_sonar])
+    return concluir(repo, arvore, args, bool(antes), feito, minutos)
 
 
 if __name__ == "__main__":
