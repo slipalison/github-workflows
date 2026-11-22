@@ -60,6 +60,23 @@ stdout, stderr, argumento de processo ou arquivo: tudo o que se imprime passa
 por `limpar`, um erro HTTP e relatado so pelo codigo, e o redirecionamento nao
 e seguido (o urllib reenviaria o cabecalho ao destino).
 
+CALIBRAGEM
+----------
+O `analyze_code_snippet` analisa o arquivo SOZINHO, sem tsconfig nem tipos, e as
+excecoes do SonarJS que dependem de tipo deixam de valer: ele acusa `void
+promessa()` (S3735) e `x?: string | undefined` (S4782) que o servidor, que ve o
+projeto, nao acusa. Ligado assim, o portao reprovaria codigo certo e empurraria
+o agente a "consertar" soltando a promessa. `--calibrar` mede isso: analisa com o
+MCP todo arquivo das `sonar.sources` na main (base vazia, e nao diff) e compara
+com o que o PROPRIO servidor tem aberto nela (OPEN e CONFIRMED, paginado). Regra
+que o MCP acusa e o servidor nao tem em lugar nenhum e "nao espelhada aqui"; a
+que bate com o servidor (mesmo arquivo e linha) e "confiavel". O JSON
+(`nao_espelhadas` com a contagem e um exemplo, a versao do MCP e a data) vai
+versionado na raiz do repositorio medido como `.sonar-local.json`, e o
+sonar_local.py o le: regra de `nao_espelhadas` nao reprova (nem no hook, para o
+agente nao reescrever codigo certo) e sai numa linha "aviso, o CI decide".
+Sem o arquivo, tudo reprova como antes.
+
 --hook
 ------
 Recebe na stdin o JSON do hook `PostToolUse` do Claude Code
@@ -72,6 +89,7 @@ USO
     sonar_local.py                 o PR inteiro (merge-base com origin/main)
     sonar_local.py --repo DIR      outro repositorio
     sonar_local.py --hook          um arquivo, pela stdin do hook
+    sonar_local.py --calibrar [--saida ARQ] [--somente src/]   gera o .sonar-local.json
 """
 
 from __future__ import annotations
@@ -96,6 +114,9 @@ REF_MAIN = "origin/main"
 PRAZO_HOOK_S = 25.0
 PRAZO_CHAMADA_S = 120.0
 PARALELO = 3
+CALIBRACAO = ".sonar-local.json"
+PAGINA_ISSUES = 500
+STATUS_ABERTOS = ["OPEN", "CONFIRMED"]
 LIMITE_ARQUIVO = 1_000_000
 ENTRADAS_DO_CI = ("pipeline", "sonar")
 REGRA_CLOUD = re.compile(r"sonarcloud\.io|sonarqube\.com")
@@ -514,6 +535,7 @@ class ClienteMcp:
         self.abre = urllib.request.build_opener(_SemRedirecionar)
         self.proximo_id = 1
         self.iniciado = False
+        self.versao = "desconhecida"
 
     def _enviar(self, mensagem: dict) -> dict:
         cabecalhos = dict(self.cabecalhos)
@@ -540,7 +562,7 @@ class ClienteMcp:
         return corpo
 
     def iniciar(self) -> None:
-        self._enviar(
+        resposta = self._enviar(
             {
                 "jsonrpc": "2.0",
                 "id": 0,
@@ -552,39 +574,69 @@ class ClienteMcp:
                 },
             }
         )
+        informacao = (resposta.get("result") or {}).get("serverInfo") or {}
+        self.versao = str(informacao.get("version") or "desconhecida")
         self._enviar({"jsonrpc": "2.0", "method": "notifications/initialized"})
         self.iniciado = True
 
-    def analisar(self, conteudo: str, linguagem: str, projeto: str, escopo: str) -> list[dict]:
+    def chamar(self, ferramenta: str, argumentos: dict) -> dict:
         self.proximo_id += 1
         corpo = self._enviar(
             {
                 "jsonrpc": "2.0",
                 "id": self.proximo_id,
                 "method": "tools/call",
-                "params": {
-                    "name": "analyze_code_snippet",
-                    "arguments": {
-                        "fileContent": conteudo,
-                        "language": linguagem,
-                        "projectKey": projeto,
-                        "scope": escopo,
-                    },
-                },
+                "params": {"name": ferramenta, "arguments": argumentos},
             }
         )
         resultado = corpo.get("result") or {}
         conteudos = resultado.get("content") or [{}]
         texto = str(conteudos[0].get("text", ""))
         if resultado.get("isError"):
-            raise NaoMediu(f"a analise falhou: {texto[:200]}")
+            raise NaoMediu(f"{ferramenta} falhou: {texto[:200]}")
         dados = resultado.get("structuredContent")
         if not isinstance(dados, dict):
             try:
                 dados = json.loads(texto)
             except ValueError:
-                raise NaoMediu("a analise devolveu algo que nao e JSON") from None
+                raise NaoMediu(f"{ferramenta} devolveu algo que nao e JSON") from None
+        return dados
+
+    def analisar(self, conteudo: str, linguagem: str, projeto: str, escopo: str) -> list[dict]:
+        dados = self.chamar(
+            "analyze_code_snippet",
+            {
+                "fileContent": conteudo,
+                "language": linguagem,
+                "projectKey": projeto,
+                "scope": escopo,
+            },
+        )
         return [i for i in dados.get("issues") or [] if isinstance(i, dict)]
+
+
+# ------------------------------------------------------------ calibragem
+
+
+def sufixo(regra: str) -> str:
+    """`typescript:S3735` e `javascript:S3735` sao a mesma regra: S3735."""
+    return regra.rsplit(":", 1)[-1]
+
+
+def ler_calibracao(repo: Path) -> set[str]:
+    """As regras que o `.sonar-local.json` diz que o MCP acusa e o servidor nao."""
+    arquivo = repo / CALIBRACAO
+    if not arquivo.is_file():
+        return set()
+    try:
+        regras = json.loads(arquivo.read_text())["nao_espelhadas"]
+        if not isinstance(regras, dict | list):
+            raise TypeError
+    except (ValueError, KeyError, TypeError):
+        raise NaoMediu(
+            f"{CALIBRACAO} ilegivel: precisa de `nao_espelhadas` (rode --calibrar)"
+        ) from None
+    return {sufixo(str(regra)) for regra in regras}
 
 
 # ---------------------------------------------------------- o que e novo
@@ -658,6 +710,7 @@ class Resultado:
     analisados: int = 0
     so_o_ci: collections.Counter = field(default_factory=collections.Counter)
     nao_medidos: list[str] = field(default_factory=list)
+    avisos: collections.Counter = field(default_factory=collections.Counter)
     sem_projeto: bool = False
     motivo_sem_projeto: str = ""
 
@@ -682,6 +735,13 @@ class Resultado:
         if self.nao_medidos:
             medido += f"; {len(self.nao_medidos)} sem medir"
         return medido
+
+    def aviso(self) -> str:
+        """As regras que o MCP acusa e o servidor nao (`.sonar-local.json`): o CI decide."""
+        if not self.avisos:
+            return ""
+        regras = ", ".join(f"{regra} \u00d7{n}" for regra, n in sorted(self.avisos.items()))
+        return f"aviso, o CI decide: {regras}"
 
     def codigo(self) -> int:
         if self.novos:
@@ -748,6 +808,7 @@ def medir(
     prazo: Prazo | None = None,
 ) -> Resultado:
     prazo = prazo or Prazo(None)
+    ignoradas = ler_calibracao(repo)
     base = merge_base(repo, ref)
     arquivos = arquivos_mudados(repo, base)
     if apenas is not None:
@@ -774,7 +835,11 @@ def medir(
                 resultado.nao_medidos.append(f"{alvo.caminho}: {saida}")
             else:
                 resultado.analisados += 1
-                resultado.novos.extend(saida)
+                for problema in saida:
+                    if sufixo(problema.regra) in ignoradas:
+                        resultado.avisos[sufixo(problema.regra)] += 1
+                    else:
+                        resultado.novos.append(problema)
     return resultado
 
 
@@ -784,6 +849,134 @@ def rodar(repo: Path, ref: str | None = None, projeto_forcado: Projeto | None = 
     if projeto is None or not projeto.chave:
         return Resultado(sem_projeto=True, motivo_sem_projeto=projeto.dispensa if projeto else "")
     return medir(repo, projeto, escolher_servidor(projeto, repo), ref)
+
+
+# --------------------------------------------------------------- calibrar
+
+
+def ref_da_main(repo: Path, ref: str | None) -> str:
+    for candidata in (ref or REF_MAIN, "main"):
+        saida = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", candidata],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        )
+        if saida.returncode == 0:
+            return candidata
+    raise NaoMediu("sem origin/main nem main para calibrar")
+
+
+def issues_do_servidor(cliente: ClienteMcp, chave: str) -> list[tuple[str, int, str]]:
+    """O que o PROPRIO servidor tem aberto no projeto: (arquivo, linha, regra)."""
+    achados: list[tuple[str, int, str]] = []
+    pagina = 1
+    while True:
+        dados = cliente.chamar(
+            "search_sonar_issues_in_projects",
+            {
+                "projectKeys": [chave],
+                "issueStatuses": STATUS_ABERTOS,
+                "pageSize": PAGINA_ISSUES,
+                "pageIndex": pagina,
+            },
+        )
+        issues = [i for i in dados.get("issues") or [] if isinstance(i, dict)]
+        for issue in issues:
+            componente = str(issue.get("component", ""))
+            caminho = componente.split(":", 1)[1] if ":" in componente else componente
+            linha = int((issue.get("textRange") or {}).get("startLine") or 0)
+            achados.append((caminho, linha, sufixo(str(issue.get("rule", "")))))
+        total = int((dados.get("paging") or {}).get("total") or 0)
+        if not issues or pagina * PAGINA_ISSUES >= total:
+            return achados
+        pagina += 1
+
+
+def classificar_regras(
+    do_mcp: list[tuple[str, int, str]], do_servidor: list[tuple[str, int, str]]
+) -> dict:
+    """Cada achado do MCP: `confiavel` se o servidor tem a mesma regra no mesmo
+    arquivo e linha; `nao_espelhada` se o servidor nao tem a regra em lugar
+    nenhum; `divergente` se tem a regra, mas noutro lugar (so informa)."""
+    posicoes = set(do_servidor)
+    regras_do_servidor = {regra for _, _, regra in do_servidor}
+    confiaveis: collections.Counter = collections.Counter()
+    divergentes: collections.Counter = collections.Counter()
+    ocorrencias: collections.Counter = collections.Counter()
+    exemplos: dict[str, str] = {}
+    for caminho, linha, regra in sorted(do_mcp):
+        if (caminho, linha, regra) in posicoes:
+            confiaveis[regra] += 1
+        elif regra in regras_do_servidor:
+            divergentes[regra] += 1
+        else:
+            ocorrencias[regra] += 1
+            exemplos.setdefault(regra, f"{caminho}:{linha}")
+    return {
+        "nao_espelhadas": {
+            regra: {"ocorrencias": n, "exemplo": exemplos[regra]}
+            for regra, n in sorted(ocorrencias.items())
+        },
+        "confiaveis": dict(sorted(confiaveis.items())),
+        "divergentes": dict(sorted(divergentes.items())),
+    }
+
+
+def calibrar(
+    repo: Path,
+    projeto: Projeto,
+    servidor: str,
+    ref: str | None = None,
+    somente: tuple[str, ...] = (),
+    aviso=None,
+) -> dict:
+    """O `.sonar-local.json`: o que o MCP acusa na main e o servidor nao."""
+    ref = ref_da_main(repo, ref)
+    p = padroes(projeto.parametros)
+    alvos = []
+    for caminho in filter(None, git(repo, "ls-tree", "-r", "-z", "--name-only", ref).split("\0")):
+        escopo, linguagem = classificar(caminho, p), linguagem_de(caminho)
+        if escopo and linguagem and (not somente or caminho.startswith(tuple(somente))):
+            alvos.append(Alvo(caminho, None, escopo, linguagem))
+    cliente = ClienteMcp(servidor, Prazo(None))
+    try:
+        cliente.iniciar()
+    except NaoMediu as erro:
+        raise NaoMediu(f"{erro}. Suba o MCP: {cliente.como_subir}") from None
+    do_servidor = issues_do_servidor(cliente, projeto.chave)
+
+    def um(alvo: Alvo) -> tuple[list[tuple[str, int, str]], str | None]:
+        conteudo = texto_da_base(repo, ref, alvo.caminho)
+        if conteudo is None or "\0" in conteudo or len(conteudo) > LIMITE_ARQUIVO:
+            return [], None
+        try:
+            issues = cliente.analisar(conteudo, alvo.linguagem, projeto.chave, alvo.escopo)
+        except NaoMediu as erro:
+            return [], f"{alvo.caminho}: {erro}"
+        return [
+            (alvo.caminho, a.linha, sufixo(a.regra)) for a in achados_de(issues, conteudo)
+        ], None
+
+    do_mcp: list[tuple[str, int, str]] = []
+    sem_medir: list[str] = []
+    with concurrent.futures.ThreadPoolExecutor(PARALELO) as pool:
+        for i, (achados, erro) in enumerate(pool.map(um, alvos), 1):
+            do_mcp.extend(achados)
+            if erro:
+                sem_medir.append(erro)
+            if aviso and i % 25 == 0:
+                aviso(f"sonar-local: calibrando, {i}/{len(alvos)} arquivos")
+    return {
+        "projeto": projeto.chave,
+        "ref": git(repo, "rev-parse", "--short", ref).strip(),
+        "versao_mcp": cliente.versao,
+        "data": time.strftime("%Y-%m-%d"),
+        "arquivos_analisados": len(alvos) - len(sem_medir),
+        "arquivos_sem_medir": len(sem_medir),
+        "problemas_do_servidor": len(do_servidor),
+        **classificar_regras(do_mcp, do_servidor),
+    }
 
 
 # -------------------------------------------------------------------- CLI
@@ -797,6 +990,8 @@ def imprimir(resultado: Resultado) -> int:
     for linha in resultado.linhas():
         diz(linha)
     diz(f"sonar-local: {resultado.resumo()}")
+    if resultado.aviso():
+        diz(f"sonar-local: {resultado.aviso()}")
     codigo = resultado.codigo()
     if codigo == 2:
         diz(f"sonar-local: nao consegui medir: {resultado.motivo_do_2()}", sys.stderr)
@@ -853,7 +1048,59 @@ def argumentos(argv: list[str] | None) -> argparse.Namespace:
         "do SonarCloud); os parametros saem do sonar-project.properties",
     )
     ap.add_argument("--hook", action="store_true", help="hook PostToolUse: JSON na stdin")
+    ap.add_argument(
+        "--calibrar",
+        action="store_true",
+        help="gera o .sonar-local.json: o que o MCP acusa na main e o servidor nao",
+    )
+    ap.add_argument("--saida", type=Path, help="com --calibrar: grava o JSON aqui (padrao: stdout)")
+    ap.add_argument(
+        "--somente",
+        action="append",
+        default=[],
+        metavar="PREFIXO",
+        help="com --calibrar: so os arquivos sob este caminho (repetivel)",
+    )
     return ap.parse_args(argv)
+
+
+def projeto_pedido(repo: Path, args: argparse.Namespace) -> Projeto | None:
+    """`--projeto`: a chave vem de fora (o workflow a dispensa) e os parametros do
+    sonar-project.properties. Sem ele, quem decide e o workflow chamador."""
+    if not args.projeto:
+        return None
+    propriedades = repo / "sonar-project.properties"
+    parametros = (
+        ler_propriedades(propriedades.read_text(errors="replace")) if propriedades.is_file() else {}
+    )
+    return Projeto(args.projeto, "", parametros)
+
+
+def rodar_calibragem(repo: Path, args: argparse.Namespace) -> int:
+    projeto = projeto_pedido(repo, args) or descobrir(repo)
+    if projeto is None or not projeto.chave:
+        diz("sonar-local: este repositorio nao tem projeto Sonar: nada a calibrar", sys.stderr)
+        return 0
+    calibragem = calibrar(
+        repo,
+        projeto,
+        escolher_servidor(projeto, repo),
+        args.base,
+        tuple(args.somente),
+        lambda texto: diz(texto, sys.stderr),
+    )
+    texto = json.dumps(calibragem, indent=2, ensure_ascii=False) + "\n"
+    if args.saida:
+        args.saida.write_text(texto)
+    else:
+        diz(texto.rstrip("\n"))
+    diz(
+        f"sonar-local: calibrado em {calibragem['arquivos_analisados']} arquivos: "
+        f"{len(calibragem['nao_espelhadas'])} regra(s) nao espelhada(s), "
+        f"{len(calibragem['confiaveis'])} confiavel(is)",
+        sys.stderr,
+    )
+    return 0
 
 
 def main(argv: list[str] | None = None, entrada=None) -> int:
@@ -862,17 +1109,9 @@ def main(argv: list[str] | None = None, entrada=None) -> int:
         return hook(entrada or sys.stdin)
     try:
         repo = raiz_do_repo(args.repo)
-        forcado = None
-        if args.projeto:
-            propriedades = repo / "sonar-project.properties"
-            forcado = Projeto(
-                args.projeto,
-                "",
-                ler_propriedades(propriedades.read_text(errors="replace"))
-                if propriedades.is_file()
-                else {},
-            )
-        resultado = rodar(repo, args.base, forcado)
+        if args.calibrar:
+            return rodar_calibragem(repo, args)
+        resultado = rodar(repo, args.base, projeto_pedido(repo, args))
     except NaoMediu as erro:
         diz(f"sonar-local: nao consegui medir: {erro}", sys.stderr)
         return 2

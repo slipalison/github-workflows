@@ -127,7 +127,9 @@ projeto, e so o que a base (merge-base com origin/main) nao tinha conta. Problem
 novo reprova a rodada. Nao conseguir medir (MCP fora, sem token, projeto
 ilegivel) tambem reprova, com a instrucao de subir o MCP; so passa com
 `--sem-sonar-local "<motivo>"`, e o motivo vai para o resumo e para o registro.
-A opcao perdoa so o "nao mediu": problema novo continua reprovando. Fica para o
+A opcao perdoa so o "nao mediu": problema novo continua reprovando. A regra que
+o `.sonar-local.json` do repositorio lista (o MCP a acusa, o servidor nao) sai
+como aviso, e nao reprova. Fica para o
 CI o que o MCP nao analisa (Rust), a cobertura do codigo novo e a duplicacao.
 
 O REGISTRO
@@ -1632,6 +1634,8 @@ def medir_sonar(repo: Path, args: argparse.Namespace) -> tuple[bool, str]:
         for linha in resultado.linhas():
             diz(f"  {linha}")
         diz(f"  Sonar local: {resultado.resumo()}")
+        if resultado.aviso():
+            diz(f"  {AMARELO}{resultado.aviso()}{FIM}")
     if resultado is not None and resultado.novos:
         diz(f"  {VERMELHO}problema novo{FIM}: o Sonar do CI reprovaria. So o CI mede: {SO_O_CI}.")
         return False, ""

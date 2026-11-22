@@ -105,6 +105,8 @@ class McpFalso:
         self.modo = modo
         self.destino = destino_do_redirect
         self.chamadas: list[dict] = []
+        self.buscas: list[dict] = []  # os argumentos de search_sonar_issues_in_projects
+        self.do_servidor: list[dict] = []  # o que o servidor "tem aberto"
         self.autorizacoes: list[str | None] = []
         servidor = self
 
@@ -168,16 +170,26 @@ class McpFalso:
         if self.modo == "sse" and metodo != "initialize" and sem_sessao:
             return self.enviar(tratador, 400, "sem sessao")
         if metodo == "initialize":
-            resultado = {"serverInfo": {"name": "falso"}}
+            resultado = {"serverInfo": {"name": "falso", "version": "falso-1.0"}}
         elif self.modo == "rpc":
             erro = {"code": -32000, "message": f"nao deu, o token era {CANARIO}"}
             return self.json(tratador, {"jsonrpc": "2.0", "id": pedido["id"], "error": erro})
         else:
             argumentos = pedido["params"]["arguments"]
-            self.chamadas.append(argumentos)
-            texto = json.dumps({"issues": regras_do_sonar(argumentos)})
+            if pedido["params"]["name"] == "search_sonar_issues_in_projects":
+                self.buscas.append(argumentos)
+                texto = json.dumps(self.pagina(argumentos))
+            else:
+                self.chamadas.append(argumentos)
+                texto = json.dumps({"issues": regras_do_sonar(argumentos)})
             resultado = {"content": [{"type": "text", "text": texto}], "isError": False}
         self.json(tratador, {"jsonrpc": "2.0", "id": pedido["id"], "result": resultado})
+
+    def pagina(self, argumentos: dict) -> dict:
+        tamanho, indice = argumentos["pageSize"], argumentos["pageIndex"]
+        abertas = [i for i in self.do_servidor if i["status"] in argumentos["issueStatuses"]]
+        fatia = abertas[(indice - 1) * tamanho : indice * tamanho]
+        return {"issues": fatia, "paging": {"pageIndex": indice, "total": len(abertas)}}
 
     def json(self, tratador, mensagem: dict) -> None:
         if self.modo == "sse":
@@ -194,6 +206,15 @@ class McpFalso:
 
     def conteudos(self) -> list[str]:
         return [c["fileContent"] for c in self.chamadas]
+
+
+def do_servidor(arquivo: str, linha: int, regra: str, status: str = "OPEN") -> dict:
+    return {
+        "rule": f"typescript:{regra}",
+        "component": f"meu-projeto:{arquivo}",
+        "status": status,
+        "textRange": {"startLine": linha},
+    }
 
 
 def porta_fechada() -> str:
@@ -264,6 +285,11 @@ class Oficina:
             env={**os.environ, **self.ambiente(url)},
             timeout=60,
         )
+
+    def calibrar(self, url: str, **opcoes) -> dict:
+        with mock.patch.dict(os.environ, self.ambiente(url)):
+            projeto = sonar_local.descobrir(self.raiz)
+            return sonar_local.calibrar(self.raiz, projeto, "homelab", **opcoes)
 
     def medir(self, url: str) -> sonar_local.Resultado:
         with mock.patch.dict(os.environ, self.ambiente(url)):
@@ -427,6 +453,140 @@ class Novos(Base):
         projeto = sonar_local.descobrir(o.raiz)
         self.assertEqual(projeto.chave, "do-arquivo")
         self.assertEqual(projeto.parametros["sonar.sources"], "src")
+
+
+COMPLEXA = "function f(a) {\n" + "  if (a) { a++; }\n" * 4 + "  return a;\n}\n"
+
+
+class Calibracao(Base):
+    """`--calibrar` e a leitura do `.sonar-local.json`."""
+
+    def com_a_main_calibravel(self) -> Oficina:
+        """Na main: um TODO (S1135) em a.ts e uma funcao complexa (S3776) em f.ts."""
+        o = self.oficina()
+        o.escrever("src/f.ts", COMPLEXA)
+        o.commitar("f")
+        o.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        return o
+
+    def test_regra_que_o_servidor_nao_tem_e_nao_espelhada_e_a_que_bate_e_confiavel(self):
+        o = self.com_a_main_calibravel()
+        with McpFalso() as mcp:
+            mcp.do_servidor = [do_servidor("src/a.ts", 2, "S1135")]
+            calibragem = o.calibrar(mcp.url)
+        self.assertEqual(
+            calibragem["nao_espelhadas"], {"S3776": {"ocorrencias": 1, "exemplo": "src/f.ts:1"}}
+        )
+        self.assertEqual(calibragem["confiaveis"], {"S1135": 1})
+        self.assertEqual(calibragem["divergentes"], {})
+        self.assertEqual(calibragem["versao_mcp"], "falso-1.0")
+        self.assertRegex(calibragem["data"], r"^\d{4}-\d{2}-\d{2}$")
+        self.assertEqual(calibragem["projeto"], "meu-projeto")
+        self.assertEqual(calibragem["arquivos_analisados"], 2)
+
+    def test_a_base_e_vazia_o_que_ja_estava_na_main_tambem_entra(self):
+        o = self.com_a_main_calibravel()
+        with McpFalso() as mcp:
+            calibragem = o.calibrar(mcp.url)
+        self.assertEqual(sorted(calibragem["nao_espelhadas"]), ["S1135", "S3776"])
+        self.assertEqual(calibragem["nao_espelhadas"]["S1135"]["exemplo"], "src/a.ts:2")
+
+    def test_regra_que_o_servidor_tem_noutro_lugar_e_divergente_e_nao_vira_excecao(self):
+        o = self.com_a_main_calibravel()
+        with McpFalso() as mcp:
+            mcp.do_servidor = [do_servidor("src/a.ts", 30, "S1135")]
+            calibragem = o.calibrar(mcp.url)
+        self.assertEqual(calibragem["divergentes"], {"S1135": 1})
+        self.assertNotIn("S1135", calibragem["nao_espelhadas"])
+
+    def test_pergunta_ao_servidor_so_os_abertos_do_projeto_e_pagina(self):
+        o = self.com_a_main_calibravel()
+        with McpFalso() as mcp, mock.patch.object(sonar_local, "PAGINA_ISSUES", 1):
+            mcp.do_servidor = [
+                do_servidor("src/x.ts", 1, "S1"),
+                do_servidor("src/y.ts", 1, "S2", "CONFIRMED"),
+                do_servidor("src/a.ts", 2, "S1135"),
+                do_servidor("src/z.ts", 1, "S3", "FIXED"),
+            ]
+            calibragem = o.calibrar(mcp.url)
+            self.assertEqual(calibragem["problemas_do_servidor"], 3)
+            self.assertEqual(calibragem["confiaveis"], {"S1135": 1})
+            self.assertEqual(len(mcp.buscas), 3)
+            for busca in mcp.buscas:
+                self.assertEqual(busca["projectKeys"], ["meu-projeto"])
+                self.assertEqual(busca["issueStatuses"], ["OPEN", "CONFIRMED"])
+
+    def test_somente_limita_os_arquivos(self):
+        o = self.com_a_main_calibravel()
+        with McpFalso() as mcp:
+            calibragem = o.calibrar(mcp.url, somente=("src/f",))
+        self.assertEqual(calibragem["arquivos_analisados"], 1)
+        self.assertEqual(sorted(calibragem["nao_espelhadas"]), ["S3776"])
+
+    def test_pela_linha_de_comando_o_json_sai_no_stdout_e_o_canario_nao(self):
+        o = self.com_a_main_calibravel()
+        with McpFalso() as mcp:
+            mcp.do_servidor = [do_servidor("src/a.ts", 2, "S1135")]
+            processo = o.rodar(mcp.url, "--calibrar")
+            arquivo = Path(o.tmp.name) / "calibragem.json"
+            gravado = o.rodar(mcp.url, "--calibrar", "--saida", str(arquivo))
+        self.assertEqual(processo.returncode, 0, processo.stderr)
+        self.assertEqual(json.loads(processo.stdout)["nao_espelhadas"]["S3776"]["ocorrencias"], 1)
+        self.assertEqual(json.loads(arquivo.read_text()), json.loads(processo.stdout))
+        self.assertEqual(gravado.stdout, "")
+        self.assertNotIn(CANARIO, processo.stdout + processo.stderr)
+
+    def calibragem_de(self, *regras: str) -> str:
+        return json.dumps(
+            {"nao_espelhadas": {r: {"ocorrencias": 2, "exemplo": "a:1"} for r in regras}}
+        )
+
+    def test_regra_listada_nao_reprova_e_vira_aviso_so_a_listada(self):
+        o = self.oficina()
+        o.escrever(sonar_local.CALIBRACAO, self.calibragem_de("S1135"))
+        o.escrever("src/a.ts", "// TODO de novo\n" + BASE_A)
+        o.escrever("src/f.ts", COMPLEXA)
+        with McpFalso() as mcp:
+            resultado = o.medir(mcp.url)
+            processo = o.rodar(mcp.url)
+        self.assertEqual(linhas_dos_novos(resultado), [("src/f.ts", 1, "typescript:S3776")])
+        self.assertEqual(resultado.aviso(), "aviso, o CI decide: S1135 \u00d71")
+        self.assertEqual(processo.returncode, 1, processo.stderr)
+        self.assertIn("sonar-local: aviso, o CI decide: S1135 \u00d71", processo.stdout)
+        self.assertNotIn("S1135 Complete", processo.stdout)
+
+    def test_so_a_regra_listada_o_codigo_sai_0(self):
+        o = self.oficina()
+        o.escrever(sonar_local.CALIBRACAO, self.calibragem_de("S1135"))
+        o.escrever("src/a.ts", "// TODO de novo\n" + BASE_A)
+        with McpFalso() as mcp:
+            processo = o.rodar(mcp.url)
+        self.assertEqual(processo.returncode, 0, processo.stderr)
+
+    def test_sem_o_arquivo_a_mesma_regra_reprova(self):
+        o = self.oficina()
+        o.escrever("src/a.ts", "// TODO de novo\n" + BASE_A)
+        with McpFalso() as mcp:
+            self.assertEqual(o.medir(mcp.url).codigo(), 1)
+
+    def test_o_hook_nao_devolve_ao_agente_a_regra_listada(self):
+        o = self.oficina()
+        o.escrever(sonar_local.CALIBRACAO, self.calibragem_de("S1135"))
+        o.escrever("src/a.ts", "// TODO de novo\n" + BASE_A)
+        entrada = json.dumps({"tool_input": {"file_path": str(o.raiz / "src/a.ts")}})
+        with McpFalso() as mcp:
+            processo = o.rodar(mcp.url, "--hook", entrada=entrada)
+            self.assertNotEqual(mcp.chamadas, [])
+        self.assertEqual((processo.returncode, processo.stdout, processo.stderr), (0, "", ""))
+
+    def test_arquivo_ilegivel_nao_vira_isencao(self):
+        o = self.oficina()
+        o.escrever(sonar_local.CALIBRACAO, "{nao e json")
+        o.escrever("src/a.ts", "// TODO de novo\n" + BASE_A)
+        with McpFalso() as mcp:
+            processo = o.rodar(mcp.url)
+        self.assertEqual(processo.returncode, 2, processo.stdout)
+        self.assertIn(".sonar-local.json ilegivel", processo.stderr)
 
 
 class Padroes(unittest.TestCase):
@@ -698,6 +858,18 @@ class ValidarLocal(Base):
             codigo, registrado, texto, _ = self.rodada(o, mcp.url, motivo="quero passar")
         self.assertEqual((codigo, registrado), (1, False), texto)
 
+    def test_o_aviso_das_regras_calibradas_aparece_e_a_rodada_passa(self):
+        o = self.oficina()
+        o.escrever(
+            sonar_local.CALIBRACAO, json.dumps({"nao_espelhadas": {"S1135": {"ocorrencias": 1}}})
+        )
+        o.escrever("src/a.ts", "// TODO de novo\n" + BASE_A)
+        o.commitar("calibrado")
+        with McpFalso() as mcp:
+            codigo, registrado, texto, _ = self.rodada(o, mcp.url)
+        self.assertEqual((codigo, registrado), (0, True), texto)
+        self.assertIn("aviso, o CI decide: S1135 \u00d71", texto)
+
     def test_workflow_vermelho_nao_chega_ao_sonar(self):
         o = self.com_problema()
         with McpFalso() as mcp:
@@ -883,6 +1055,87 @@ ISCAS = [
         "        return 2\n",
         "Hook.test_mcp_fora_sai_0_em_silencio",
         "o hook trava a edicao quando o MCP cai",
+    ),
+    _s(
+        "sonar_local.py",
+        "arquivo = repo / CALIBRACAO",
+        'arquivo = repo / "outro.json"',
+        "Calibracao.test_regra_listada_nao_reprova_e_vira_aviso_so_a_listada",
+        "o .sonar-local.json nao e lido",
+    ),
+    _s(
+        "sonar_local.py",
+        "if sufixo(problema.regra) in ignoradas:",
+        "if sufixo(problema.regra) in set():",
+        "Calibracao.test_o_hook_nao_devolve_ao_agente_a_regra_listada",
+        "o hook devolve a regra calibrada ao agente",
+    ),
+    _s(
+        "sonar_local.py",
+        "if sufixo(problema.regra) in ignoradas:",
+        "if True:",
+        "Calibracao.test_regra_listada_nao_reprova_e_vira_aviso_so_a_listada",
+        "toda regra vira aviso, e nao so a listada",
+    ),
+    _s(
+        "sonar_local.py",
+        "        raise NaoMediu(\n"
+        '            f"{CALIBRACAO} ilegivel: precisa de `nao_espelhadas` (rode --calibrar)"\n'
+        "        ) from None",
+        "        return set()",
+        "Calibracao.test_arquivo_ilegivel_nao_vira_isencao",
+        "arquivo ilegivel e lido como 'sem calibragem'",
+    ),
+    _s(
+        "sonar_local.py",
+        "            confiaveis[regra] += 1\n        elif regra in regras_do_servidor:",
+        "            ocorrencias[regra] += 1\n"
+        "            exemplos.setdefault(regra, caminho)\n"
+        "        elif regra in regras_do_servidor:",
+        "Calibracao.test_regra_que_o_servidor_nao_tem_e_nao_espelhada_e_a_que_bate_e_confiavel",
+        "o que bate com o servidor tambem vira nao espelhada",
+    ),
+    _s(
+        "sonar_local.py",
+        "        elif regra in regras_do_servidor:\n            divergentes[regra] += 1",
+        "        elif False:\n            divergentes[regra] += 1",
+        "Calibracao.test_regra_que_o_servidor_tem_noutro_lugar_e_divergente_e_nao_vira_excecao",
+        "a regra que o servidor tem noutro lugar vira excecao",
+    ),
+    _s(
+        "sonar_local.py",
+        "        pagina += 1\n",
+        "        break\n",
+        "Calibracao.test_pergunta_ao_servidor_so_os_abertos_do_projeto_e_pagina",
+        "so a primeira pagina do servidor e lida",
+    ),
+    _s(
+        "sonar_local.py",
+        'STATUS_ABERTOS = ["OPEN", "CONFIRMED"]',
+        'STATUS_ABERTOS = ["OPEN"]',
+        "Calibracao.test_pergunta_ao_servidor_so_os_abertos_do_projeto_e_pagina",
+        "os CONFIRMED do servidor nao contam",
+    ),
+    _s(
+        "sonar_local.py",
+        "(not somente or caminho.startswith(tuple(somente)))",
+        "True",
+        "Calibracao.test_somente_limita_os_arquivos",
+        "--somente e ignorado",
+    ),
+    _s(
+        "sonar_local.py",
+        'git(repo, "ls-tree", "-r", "-z", "--name-only", ref)',
+        'git(repo, "diff", "--name-only", "-z", ref)',
+        "Calibracao.test_a_base_e_vazia_o_que_ja_estava_na_main_tambem_entra",
+        "a calibragem le o diff, e nao a main inteira",
+    ),
+    _s(
+        "validar_local.py",
+        '        if resultado.aviso():\n            diz(f"  {AMARELO}{resultado.aviso()}{FIM}")\n',
+        "",
+        "ValidarLocal.test_o_aviso_das_regras_calibradas_aparece_e_a_rodada_passa",
+        "a rodada esconde o aviso do CI",
     ),
     _s(
         "sonar_local.py",
