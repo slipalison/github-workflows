@@ -1148,15 +1148,34 @@ def argumentos(argv: list[str] | None) -> argparse.Namespace:
     return ap.parse_args(argv)
 
 
+MENSAGEM_SAIDA = "--saida fica dentro do repositorio ou do diretorio temporario"
 REF_SEGURA = re.compile(r"\w[\w./~^@{}-]*")
 CHAVE_SEGURA = re.compile(r"[\w.:-]+")
 
 
-def argumentos_seguros(args: argparse.Namespace, repo: Path) -> Path | None:
+def raizes_de_saida(repo: Path) -> list[str]:
+    return [str(repo), tempfile.gettempdir()]
+
+
+def gravar_dentro(caminho: Path, raizes: list[str], texto: str) -> None:
+    """Grava `texto` em `caminho` so se o caminho real fica DENTRO de uma das
+    raizes: o `realpath` + `commonpath` na mesma funcao do `open`, a forma que o
+    Sonar reconhece como validacao (S8707)."""
+    alvo = os.path.realpath(caminho)
+    for raiz in raizes:
+        pasta = os.path.realpath(raiz)
+        if os.path.commonpath([pasta, alvo]) == pasta:
+            with open(alvo, "w") as arquivo:
+                arquivo.write(texto)
+            return
+    raise NaoMediu(MENSAGEM_SAIDA)
+
+
+def argumentos_seguros(args: argparse.Namespace, repo: Path) -> None:
     """O que vem da linha de comando so entra se for do tamanho que se espera: a
     ref e a chave sao palavras (nada que o git leia como opcao), `--somente` e
     relativo e fica dentro do repositorio, e `--saida` fica no repositorio ou no
-    diretorio temporario. Devolve o `--saida` ja confinado."""
+    diretorio temporario (`gravar_dentro` confere de novo, onde grava)."""
     if args.base and not REF_SEGURA.fullmatch(args.base):
         raise NaoMediu(f"--base espera uma ref do git, e nao {args.base!r}")
     if args.projeto and not CHAVE_SEGURA.fullmatch(args.projeto):
@@ -1165,12 +1184,8 @@ def argumentos_seguros(args: argparse.Namespace, repo: Path) -> Path | None:
         normal = os.path.normpath(prefixo)
         if os.path.isabs(normal) or normal == ".." or normal.startswith(".." + os.sep):
             raise NaoMediu(f"--somente espera um caminho dentro do repositorio: {prefixo!r}")
-    if not args.saida:
-        return None
-    real = confinar(args.saida, [str(repo), tempfile.gettempdir()])
-    if real is None:
-        raise NaoMediu("--saida fica dentro do repositorio ou do diretorio temporario")
-    return Path(real)
+    if args.saida and confinar(args.saida, raizes_de_saida(repo)) is None:
+        raise NaoMediu(MENSAGEM_SAIDA)
 
 
 def projeto_pedido(repo: Path, args: argparse.Namespace) -> Projeto | None:
@@ -1181,7 +1196,7 @@ def projeto_pedido(repo: Path, args: argparse.Namespace) -> Projeto | None:
     return Projeto(args.projeto, "", propriedades_do_repo(repo))
 
 
-def rodar_calibragem(repo: Path, args: argparse.Namespace, saida: Path | None) -> None:
+def rodar_calibragem(repo: Path, args: argparse.Namespace) -> None:
     projeto = projeto_do_repo(repo, projeto_pedido(repo, args))
     if projeto is None or not projeto.chave:
         diz("sonar-local: este repositorio nao tem projeto Sonar: nada a calibrar", sys.stderr)
@@ -1195,8 +1210,8 @@ def rodar_calibragem(repo: Path, args: argparse.Namespace, saida: Path | None) -
         lambda texto: diz(texto, sys.stderr),
     )
     texto = json.dumps(calibragem, indent=2, ensure_ascii=False) + "\n"
-    if saida:
-        saida.write_text(texto)
+    if args.saida:
+        gravar_dentro(args.saida, raizes_de_saida(repo), texto)
     else:
         diz(texto.rstrip("\n"))
     diz(
@@ -1213,9 +1228,9 @@ def main(argv: list[str] | None = None, entrada=None) -> int:
         return hook(entrada or sys.stdin, args.repo)
     try:
         repo = raiz_do_repo(args.repo)
-        saida = argumentos_seguros(args, repo)
+        argumentos_seguros(args, repo)
         if args.calibrar:
-            rodar_calibragem(repo, args, saida)
+            rodar_calibragem(repo, args)
             return 0
         resultado = rodar(repo, args.base, projeto_pedido(repo, args))
     except NaoMediu as erro:

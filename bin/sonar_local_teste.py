@@ -1402,17 +1402,31 @@ ISCAS = [
     ),
     _s(
         "sonar_local.py",
-        "    real = confinar(args.saida, [str(repo), tempfile.gettempdir()])\n",
-        "    real = os.path.realpath(args.saida)\n",
+        "    if args.saida and confinar(args.saida, raizes_de_saida(repo)) is None:\n",
+        "    if False:\n",
         "Confinamento.test_saida_so_no_repositorio_ou_no_diretorio_temporario",
-        "--saida grava onde a pessoa mandar",
+        "--saida grava onde a pessoa mandar (e `gravar_dentro` tambem deixa)",
+        extra=(
+            (
+                "sonar_local.py",
+                "        if os.path.commonpath([pasta, alvo]) == pasta:",
+                "        if True:",
+            ),
+        ),
     ),
     _s(
         "sonar_local.py",
         "    real = os.path.realpath(caminho)\n",
         "    real = os.path.abspath(caminho)\n",
         "Confinamento.test_saida_por_link_que_sai_do_diretorio_temporario_tambem_e_recusada",
-        "o link para fora do temporario passa",
+        "o link para fora do temporario passa (e `gravar_dentro` tambem deixa)",
+        extra=(
+            (
+                "sonar_local.py",
+                "    alvo = os.path.realpath(caminho)\n",
+                "    alvo = os.path.abspath(caminho)\n",
+            ),
+        ),
     ),
     _s(
         "sonar_local.py",
