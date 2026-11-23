@@ -863,9 +863,10 @@ python3 /caminho/para/github-workflows/bin/validar_local.py --status   # o HEAD 
   - `harden-runner` — em modo host ele instalaria um agente de rede na sua máquina;
   - `codeql-action` — manda SARIF para a aba Security;
   - `docker/login-action` — sem `GITHUB_TOKEN` aqui, e o PR não publica imagem;
-  - o **Sonar** — a análise é do SonarQube, e só o CI a mede; na cópia, o
+  - o **Sonar do CI** — a análise do servidor é só do CI; na cópia, o
     `sonar_projeto` vazio vem com `sonar_dispensa` dizendo isso, para o portão
-    da esteira não reprovar a rodada local por "Sonar desligado sem motivo";
+    da esteira não reprovar a rodada local por "Sonar desligado sem motivo". O
+    que dá para medir aqui, mede o [Sonar local](#sonar-local);
   - a **publicação da imagem** — o job `imagem` publica `sha-<commit>` no GHCR
     até no PR; na cópia da esteira que ele monta, todo `push: true` vira
     `push: false`. A imagem é construída e varrida pelo Trivy do mesmo jeito.
@@ -894,6 +895,16 @@ python3 /caminho/para/github-workflows/bin/validar_local.py --status   # o HEAD 
   `~/.config/<repositório>/*.env`. `GH_PACKAGES_TOKEN` é o token do `gh`.
 - **`actionlint` só nos workflows que mudaram** em relação à `main`: um aviso
   antigo não trava ninguém, e um novo não passa.
+- **Sonar local, antes dos workflows.** O
+  [`sonar_local.py`](bin/sonar_local.py) (seção abaixo) leva 1 a 2 min, e o `act`,
+  até 40: um "todo" num comentário não espera o fim da rodada. Roda primeiro (com
+  `-W` e `-j` também, porque custa pouco). Problema novo para a rodada antes do
+  primeiro workflow, com a lista e a dica "rode `sonar_local.py` até sair 0"; não
+  conseguir medir também, a não ser com `--sem-sonar-local "<motivo>"` (o motivo
+  vai para o resumo e para o registro, e a opção só perdoa o "não mediu", nunca o
+  problema novo). Se passar, os workflows rodam e o registro leva o que foi
+  medido, sem medir de novo: a árvore é a mesma, e a rodada recusa árvore que
+  mudou no meio.
 - **Registro.** Tudo verde, com a árvore commitada, grava
   `.git/validar-local/<árvore>`. É o que diz, no PR, que aquela árvore passou.
 
@@ -907,6 +918,120 @@ estouram a memória. Ele deixa o job pesado sozinho, limita o `cargo` a dois pro
 se marca como a primeira vítima do OOM killer (`oom_score_adj=1000`), para que
 seja a validação a morrer, e não a sessão de quem a chamou. Um `/tmp` em tmpfs
 conta como memória.
+
+### Sonar local
+
+O portão do SonarQube exige **zero problemas novos**, e PR verde no `validar-local`
+caía nele (S1135 num comentário com a palavra "todo", S3776, S3358, S2301,
+S7721), cada conserto custando outro run do Actions.
+[`bin/sonar_local.py`](bin/sonar_local.py) mede o mesmo aqui, pelo servidor MCP
+da Sonar que a máquina tem em `127.0.0.1` (`:8091`, o SonarQube do homelab, para
+repositório privado; `:8090`, o SonarCloud, para o público). A ferramenta
+`analyze_code_snippet` roda o analisador com o **perfil de qualidade do projeto**:
+as mesmas regras do portão.
+
+```bash
+python3 /caminho/para/github-workflows/bin/sonar_local.py            # o PR inteiro
+python3 /caminho/para/github-workflows/bin/sonar_local.py --projeto slipalison_coluna
+```
+
+- **Projeto, servidor e arquivos vêm de onde a esteira decide**: `sonar_projeto`,
+  `sonar_host` e `sonar_parametros` do workflow que chama o `pipeline.yml` (ou
+  `projeto`/`host`/`parametros` do `sonar.yml`), com o `sonar-project.properties`
+  como base. Sem `sonar_host`, a visibilidade do repositório decide, como no
+  `pipeline.yml`. `sonar.sources`, `sonar.exclusions`, `sonar.tests`,
+  `sonar.test.inclusions` e `sonar.test.exclusions` dizem o que entra e se é
+  `TEST` ou `MAIN`. Sem `sonar_projeto` (análise automática do SonarCloud, ou sem
+  chamador) e com o repositório **público**, usa `<dono>_<repo>` se o MCP do
+  SonarCloud confirmar que o projeto existe (`search_my_sonarqube_projects`), e o
+  coluna e este repositório se medem sem opção. Sem isso, diz que não há Sonar e
+  sai 0; `--projeto CHAVE` força a chave.
+- **"Novo" como o Sonar rastreia, e não "linha alterada".** Cada arquivo que o PR
+  muda (commitado, na árvore de trabalho ou não rastreado, a partir do
+  merge-base com `origin/main`) é analisado na versão da base e na atual, e um
+  problema é novo quando (regra, mensagem, texto da linha) não existe na base:
+  linha deslocada não vira falso novo, e a complexidade de uma função cujo
+  cabeçalho não mudou, mas passou de 15, aparece. Um segundo problema igual a um
+  que a base tinha é novo; os números da mensagem não contam (a função que já
+  estava acima do limite e cresceu é o mesmo problema).
+- **Saída:** `arquivo:linha regra mensagem` por problema e um resumo (`N problemas
+  novos em M arquivos`, e quantos só o CI mede, por linguagem). Código **0**
+  limpo, **1** com problema novo, **2** quando não deu para medir (MCP fora, sem
+  token, projeto ilegível), com o comando para subir o MCP.
+- **O que ele não mede, e o CI mede:** linguagem sem analisador no MCP (**Rust**,
+  contado em "só o CI mede", nunca em silêncio), a cobertura do código novo, a
+  duplicação e os **security hotspots**. O `analyze_code_snippet` só devolve
+  issues, e o portão exige todo hotspot novo revisado. Medido no basalto#194, ele
+  reprovou por dois S5852 (regex com backtracking) com zero problemas novos e
+  este script limpo. O resumo diz isso sempre que analisa um arquivo, e a regra
+  `sonarjs/slow-regex` do `eslint-plugin-sonarjs`, que é a mesma implementação do
+  SonarJS, reproduziu os dois. A análise é por arquivo: regra que precisa do projeto inteiro
+  também fica para o CI. **Em Python, a análise de fluxo de segurança
+  (`pythonsecurity:*`, como S6549 e S8707) é só do CI**: medido neste
+  repositório, o MCP achou os 10 problemas comuns de um PR e nenhum dos 2 de
+  fluxo; o resumo diz isso sempre que há arquivo Python. Custa ~2 s por arquivo no SonarQube do homelab e mais no
+  SonarCloud; só os arquivos com problema são analisados duas vezes.
+- **Calibragem (`--calibrar`): o que o MCP acusa e o servidor não.** O
+  `analyze_code_snippet` analisa o arquivo **sozinho**, sem `tsconfig` nem tipos,
+  e as exceções do SonarJS que dependem de tipo deixam de valer: ele acusa
+  `void promessa()` (S3735) e `x?: string | undefined` (S4782, que o
+  `exactOptionalPropertyTypes` exige) que o servidor não acusa. Ligado assim, o
+  portão reprovaria código certo e empurraria o agente a "consertar" soltando a
+  promessa. `sonar_local.py --calibrar [--somente src/]` analisa com
+  o MCP todo arquivo das `sonar.sources` na `main` (base vazia, e não diff) e
+  compara com o que o **próprio servidor** tem aberto nela (`OPEN` e `CONFIRMED`,
+  paginado, pelo `search_sonar_issues_in_projects`). Regra que o MCP acusa e o
+  servidor não tem em lugar nenhum é `nao_espelhadas` (com a contagem e um
+  `arquivo:linha`); a que bate com o servidor, no mesmo arquivo e linha, é
+  `confiaveis`; a que o servidor tem, mas noutro lugar, é `divergentes` (só
+  informa). O JSON sai no stdout, com a versão da imagem do MCP e a data.
+- **A calibragem é central, por chave de projeto:
+  [`calibragem/<chave>.json`](calibragem/)** neste repositório (hoje
+  `basalto.json` e `slipalison_coluna.json`). Ela depende do perfil do servidor e
+  da imagem do MCP, e não do repositório, e assim chega a todo clone sem esperar
+  a `main` dele. O `sonar_local.py` lê a da chave do projeto medido; um
+  **`.sonar-local.json`** na raiz do repositório medido ainda vale e **soma** à
+  central, sem substituí-la. A regra de `nao_espelhadas` não reprova (nem no
+  hook, para o agente não reescrever código certo) e sai numa linha `aviso, o CI
+  decide: S3735 ×2 (central)`, dizendo de onde veio cada exceção (`central`,
+  `.sonar-local.json` ou as duas). Sem calibragem, tudo reprova; arquivo
+  ilegível dá código 2, e nunca vira isenção. Se a versão da imagem do MCP
+  medida agora for outra que a gravada, o resumo avisa `calibracao de <versão>:
+  recalibre`, e só avisa: não reprova.
+- **Como recalibrar:** com o repositório na `main` e o MCP no ar, rode
+  `sonar_local.py --calibrar > calibragem/<chave>.json` (no basalto, ~2,5 min; no
+  coluna, ~18 min, pelo SonarCloud; `--projeto <chave>` quando o workflow dispensa
+  o Sonar) e abra o PR aqui. **Quando:** ao trocar a imagem do MCP (o aviso acima)
+  ou o perfil de qualidade do projeto no servidor.
+- **O que chega de fora fica dentro do repositório.** O `--hook` só lê o
+  `file_path` que fica DENTRO do repositório do diretório do hook (`--repo`, o
+  atual), por `os.path.realpath` + `os.path.commonpath`: caminho fora dele, ou
+  link que aponta para fora, sai 0 em silêncio. `--somente` é relativo e sem `..`,
+  `--base` e `--projeto` só aceitam o formato de uma ref e de uma chave, e nenhum
+  caminho da linha de comando é aberto para escrita (o JSON da calibragem sai no
+  stdout).
+- **Segredo.** O token vem do helper de headers da máquina, fica só em memória e
+  só vai a `127.0.0.1` (outro destino é recusado, e o redirecionamento não é
+  seguido). Nada dele sai em stdout, stderr, argumento ou arquivo, nem num erro
+  HTTP.
+
+**No agente: o hook `PostToolUse`.** Para o Claude Code receber o problema na hora
+em que edita, e não só no `validar-local`, ponha no `.claude/settings.json` do
+repositório (dentro de `hooks.PostToolUse`):
+
+```json
+{ "matcher": "Edit|Write|MultiEdit", "hooks": [ { "type": "command", "command": "python3 \"$HOME/projetos/github-workflows/bin/sonar_local.py\" --hook", "timeout": 30 } ] }
+```
+
+O hook lê o JSON do evento na stdin (`tool_input.file_path`), analisa só aquele
+arquivo (base × atual) e, com problema novo, escreve a lista no stderr e sai com
+**2**: o agente a recebe de volta. Arquivo fora do Sonar, sem problema novo ou sem
+condição de medir (MCP fora, sem rede) sai 0 em silêncio — editar nunca trava por
+causa do MCP. Teto de 25 s.
+
+Os testes ([`sonar_local_teste.py`](bin/sonar_local_teste.py)) usam um servidor
+MCP falso em thread e um helper que devolve um token-canário, e cada um tem uma
+**isca**: a classe `Iscas` estraga a regra que ele protege e exige que ele reprove.
 
 ## O que tem aqui
 
@@ -933,7 +1058,7 @@ Composite actions: [`preparar`](.github/actions/preparar/action.yml),
 Scripts: [`resumo_sarif.py`](bin/resumo_sarif.py),
 [`cobertura.py`](bin/cobertura.py), [`pinar_actions.py`](bin/pinar_actions.py),
 [`semear_secret.py`](bin/semear_secret.py), [`versao.py`](bin/versao.py),
-[`validar_local.py`](bin/validar_local.py).
+[`validar_local.py`](bin/validar_local.py), [`sonar_local.py`](bin/sonar_local.py).
 
 Hook: [`hooks/commit-msg`](hooks/commit-msg), a mesma regra de `versao.py` antes
 de o commit existir.

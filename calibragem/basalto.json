@@ -1,0 +1,26 @@
+{
+  "projeto": "basalto",
+  "ref": "f38df35c",
+  "versao_mcp": "1.27.0.4335",
+  "data": "2026-11-22",
+  "arquivos_analisados": 95,
+  "arquivos_sem_medir": 0,
+  "problemas_do_servidor": 12,
+  "nao_espelhadas": {
+    "S3735": {
+      "ocorrencias": 7,
+      "exemplo": "frontend/src/auth/session-expired-screen.tsx:55"
+    },
+    "S4782": {
+      "ocorrencias": 9,
+      "exemplo": "frontend/src/api/client.ts:99"
+    }
+  },
+  "confiaveis": {
+    "S1135": 5,
+    "S6759": 4,
+    "S7718": 2,
+    "S7781": 1
+  },
+  "divergentes": {}
+}

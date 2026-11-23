@@ -1,0 +1,93 @@
+{
+  "projeto": "slipalison_coluna",
+  "ref": "8966981",
+  "versao_mcp": "1.27.0.4335",
+  "data": "2026-11-22",
+  "arquivos_analisados": 114,
+  "arquivos_sem_medir": 0,
+  "problemas_do_servidor": 166,
+  "nao_espelhadas": {
+    "S1186": {
+      "ocorrencias": 1,
+      "exemplo": "src/atoms/atoms.test.tsx:1106"
+    },
+    "S1848": {
+      "ocorrencias": 2,
+      "exemplo": "src/csp.test.tsx:374"
+    },
+    "S1940": {
+      "ocorrencias": 5,
+      "exemplo": "src/atoms/atoms.test.tsx:1073"
+    },
+    "S2871": {
+      "ocorrencias": 8,
+      "exemplo": "src/area-segura.test.tsx:451"
+    },
+    "S3735": {
+      "ocorrencias": 1,
+      "exemplo": "src/atoms/atoms.test.tsx:152"
+    },
+    "S4782": {
+      "ocorrencias": 43,
+      "exemplo": "src/atoms/Button.tsx:42"
+    },
+    "S5843": {
+      "ocorrencias": 2,
+      "exemplo": "src/area-segura.test.tsx:372"
+    },
+    "S7718": {
+      "ocorrencias": 1,
+      "exemplo": "src/csp.test.tsx:419"
+    },
+    "S7721": {
+      "ocorrencias": 7,
+      "exemplo": "src/carrossel-e-abas.test.tsx:181"
+    },
+    "S7750": {
+      "ocorrencias": 10,
+      "exemplo": "src/atoms/atoms.test.tsx:686"
+    },
+    "S9382": {
+      "ocorrencias": 4,
+      "exemplo": "src/atoms/atoms.test.tsx:1019"
+    }
+  },
+  "confiaveis": {
+    "ImgWithoutAltCheck": 9,
+    "S1135": 3,
+    "S1854": 2,
+    "S1874": 1,
+    "S3358": 5,
+    "S3776": 4,
+    "S4036": 1,
+    "S4138": 6,
+    "S4624": 1,
+    "S4666": 1,
+    "S6479": 2,
+    "S6557": 2,
+    "S6635": 1,
+    "S6819": 18,
+    "S6845": 1,
+    "S6847": 1,
+    "S7722": 2,
+    "S7761": 13,
+    "S7766": 1,
+    "S7773": 2,
+    "S7781": 3,
+    "S8786": 2
+  },
+  "divergentes": {
+    "ImgWithoutAltCheck": 9,
+    "S1135": 1,
+    "S1854": 2,
+    "S1874": 1,
+    "S3358": 5,
+    "S3776": 1,
+    "S4138": 6,
+    "S4666": 2,
+    "S6557": 2,
+    "S6819": 12,
+    "S7761": 16,
+    "S7773": 2
+  }
+}

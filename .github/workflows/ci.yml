@@ -70,6 +70,13 @@ jobs:
         # esperada diferente da calculada.
         run: python3 bin/versao_teste.py
 
+      - name: sonar_local.py, com as iscas
+        # Servidor MCP falso e helper falso com um token-canario: o canario nao
+        # pode sair na saida, o redirecionamento nao e seguido, problema novo
+        # reprova o validar-local. A classe `Iscas` estraga cada regra e exige
+        # que o teste dela reprove — teste nunca visto vermelho nao prova nada.
+        run: python3 bin/sonar_local_teste.py
+
       - name: Provar os portoes nas DUAS cores
         # O teste que importa nao e "o script roda": e "o script REPROVA quando
         # deve". Um portao que nunca foi visto vermelho e um portao que ninguem
