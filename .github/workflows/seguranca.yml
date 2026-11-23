@@ -366,8 +366,19 @@ jobs:
           # escreve um SARIF com as regras e nenhum resultado. Um clone raso ou
           # um "dubious ownership" do git dariam o mesmo. A prova e a linha
           # "N commits scanned" que ele mesmo imprime, com N maior que zero.
+          #
+          # `--log-opts`: so o historico que chega a esta ref. Sem ele, o
+          # Gitleaks roda `git log --all`, e o checkout com historico completo
+          # traz as branches de todos os PRs abertos (o runner self-hosted
+          # guarda ainda as de runs anteriores). Cada branch declara o proprio
+          # dado de teste no SEU `.gitleaks.toml`, que esta ref nao tem: em
+          # 2026-11-23 a chave HMAC falsa do E2E da branch do basalto#196
+          # reprovou o basalto#197, que nao a continha (1787 commits varridos
+          # com `--all` e 1 achado; 144 so com o HEAD e nenhum). A branch e
+          # julgada no proprio PR, e a `main` pelo historico dela.
           log="$RUNNER_TEMP/gitleaks.log"
-          "$RUNNER_TEMP/gitleaks" detect --source . --report-format sarif \
+          "$RUNNER_TEMP/gitleaks" detect --source . --log-opts="--full-history HEAD" \
+            --report-format sarif \
             --report-path "$SAIDA/gitleaks.sarif" --exit-code 0 2>&1 | tee "$log"
           if [ ! -s "$SAIDA/gitleaks.sarif" ]; then
             echo "::error::O Gitleaks saiu com 0 e nao escreveu o SARIF."
